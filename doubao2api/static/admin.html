@@ -219,6 +219,77 @@ class="px-2.5 py-1 bg-brand-900/40 text-brand-300 text-xs rounded-full border bo
 <td class="py-2 px-3 text-slate-400 font-mono">{{l.ms}}ms</td></tr>
 <tr v-if="!logs.length"><td colspan="6" class="py-8 text-center text-slate-500">暂无请求记录</td></tr>
 </tbody></table></div></div></section>
+<!-- TAB 4: 账号管理 -->
+<section v-show="activeTab===4">
+<div class="flex items-center gap-3 mb-4 flex-wrap">
+<button @click="fetchAccounts" class="btn">刷新</button>
+<span class="text-xs text-slate-400">总计 {{accountData.total}} 个账号，健康 {{accountData.healthy}} 个</span>
+</div>
+<!-- 添加账号 -->
+<div class="card mb-4">
+<h3 class="text-sm font-medium text-slate-300 mb-3">添加账号（上传 session JSON 文件）</h3>
+<div class="flex items-center gap-3 flex-wrap">
+<input type="text" v-model="accountForm.name" placeholder="账号名称（可选，默认取文件名）" class="flex-1 min-w-[200px] text-sm"/>
+<input type="file" id="acct-file" accept=".json" class="text-sm text-slate-400 file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-brand-600 file:text-white file:text-xs file:cursor-pointer"/>
+<button @click="addAccount" :disabled="accountForm.loading" class="btn">{{accountForm.loading?'上传中...':'添加'}}</button>
+</div>
+</div>
+<!-- 账号列表 -->
+<div class="card p-0 overflow-x-auto">
+<table class="w-full text-sm">
+<thead><tr class="text-left text-xs text-slate-500 border-b border-slate-700">
+<th class="py-2 px-3">名称</th><th class="py-2 px-3">状态</th><th class="py-2 px-3">成功</th>
+<th class="py-2 px-3">失败</th><th class="py-2 px-3">连续失败</th><th class="py-2 px-3">风控</th>
+<th class="py-2 px-3">今日额度</th><th class="py-2 px-3">最后使用</th><th class="py-2 px-3">操作</th></tr></thead>
+<tbody><tr v-for="acct in accountData.accounts" :key="acct.name" class="border-b border-slate-800 hover:bg-slate-800/50 transition-colors">
+<td class="py-2 px-3 font-medium text-slate-200">{{acct.name}}</td>
+<td class="py-2 px-3"><span :class="acct.is_healthy?'text-green-400':(acct.enabled?'text-red-400':'text-slate-500')">{{acct.enabled?(acct.is_healthy?'健康':'异常'):'停用'}}</span></td>
+<td class="py-2 px-3 text-green-400 font-mono">{{acct.success_count}}</td>
+<td class="py-2 px-3 text-red-400 font-mono">{{acct.failure_count}}</td>
+<td class="py-2 px-3 font-mono">{{acct.consecutive_failures}}</td>
+<td class="py-2 px-3">{{acct.needs_captcha?'⚠️ 需验证码':'—'}}</td>
+<td class="py-2 px-3 font-mono">{{acct.daily_quota_used}}</td>
+<td class="py-2 px-3 text-slate-400 font-mono text-xs">{{fmtTime(acct.last_used_at)}}</td>
+<td class="py-2 px-3 whitespace-nowrap">
+<button @click="toggleAccount(acct.name)" class="btn-sm">{{acct.enabled?'停用':'启用'}}</button>
+<button @click="probeAccount(acct.name)" class="btn-sm ml-1">探活</button>
+<button @click="deleteAccount(acct.name)" class="btn-sm ml-1 text-red-400 hover:text-red-300">删除</button>
+</td></tr>
+<tr v-if="!accountData.accounts.length"><td colspan="9" class="py-8 text-center text-slate-500">暂无账号。请上传 session 文件或配置 DOUBAO_ACCOUNTS_DIR</td></tr>
+</tbody></table></div>
+</section>
+<!-- TAB 5: 通道配置 -->
+<section v-show="activeTab===5">
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+<div class="card">
+<h3 class="text-sm font-medium text-slate-300 mb-3">免费账号池（逆向通道）</h3>
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-slate-400">已配置</span>
+<span :class="channelData.free_accounts.configured?'text-green-400':'text-red-400'">{{channelData.free_accounts.configured?'是':'否'}}</span></div>
+<div class="flex justify-between"><span class="text-slate-400">账号总数</span><span class="font-mono">{{channelData.free_accounts.total}}</span></div>
+<div class="flex justify-between"><span class="text-slate-400">健康账号</span><span class="font-mono text-green-400">{{channelData.free_accounts.healthy}}</span></div>
+<div class="flex justify-between"><span class="text-slate-400">默认视频通道</span><span class="font-mono text-brand-400">{{channelData.default_channel}}</span></div>
+</div>
+</div>
+<div class="card">
+<h3 class="text-sm font-medium text-slate-300 mb-3">火山引擎官方通道</h3>
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-slate-400">已配置</span>
+<span :class="channelData.volcano.configured?'text-green-400':'text-red-400'">{{channelData.volcano.configured?'是':'否'}}</span></div>
+<div class="flex justify-between"><span class="text-slate-400">API Key</span>
+<span :class="channelData.volcano.api_key_set?'text-green-400':'text-slate-500'">{{channelData.volcano.api_key_set?'已设置 (VOLC_API_KEY)':'未设置'}}</span></div>
+<div class="mt-2 pt-2 border-t border-slate-700 text-xs text-slate-500 leading-relaxed">
+模型：<code class="text-brand-400">volc-chat</code> / <code class="text-brand-400">volc-image</code> / <code class="text-brand-400">volc-video</code><br/>
+在环境变量中设置 <code>VOLC_API_KEY</code> 后启用，可选配置 <code>VOLC_BASE_URL</code>、<code>VOLC_CHAT_MODEL</code>、<code>VOLC_IMAGE_MODEL</code>、<code>VOLC_VIDEO_MODEL</code>。
+</div>
+</div>
+</div>
+</div>
+<div class="card mt-4 text-xs text-slate-500 leading-relaxed">
+<h3 class="text-sm font-medium text-slate-300 mb-2">路由说明</h3>
+<p><code class="text-brand-400">doubao*</code> 模型优先走免费账号池；池不可用时回退到浏览器单账号，再回退到官方通道。<code class="text-brand-400">volc*</code> 模型固定走官方通道。</p>
+</div>
+</section>
 </div></div></div>
 <script>
 const NOVNC_URL="{{NOVNC_URL}}";
@@ -227,12 +298,14 @@ createApp({setup(){
 const API=window.location.origin;
 const key=new URLSearchParams(window.location.search).get('key')||'';
 const headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'};
-const tabs=ref([{name:'概览'},{name:'登录'},{name:'API 测试'},{name:'请求日志'}]);
+const tabs=ref([{name:'概览'},{name:'登录'},{name:'API 测试'},{name:'请求日志'},{name:'账号管理'},{name:'通道配置'}]);
 const icons=[
 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>',
 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/></svg>',
 '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
-'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>'];
+'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>',
+'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>',
+'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>'];
 const activeTab=ref(0);
 const session=ref(null);
 const sysInfo=ref(null);
@@ -242,6 +315,9 @@ const qr=reactive({img:'',st:'',text:'等待生成'});
 const test=reactive({model:'doubao-think',stream:true,prompt:'',output:'',thinking:'',thinkOpen:true,error:'',loading:false,ms:0,searchResults:null});
 const logs=ref([]);
 const screenshot=reactive({img:"",loading:false,time:""});
+const accountData=ref({accounts:[],total:0,healthy:0});
+const channelData=ref({free_accounts:{configured:false,total:0,healthy:0},volcano:{configured:false,api_key_set:false},default_channel:'free'});
+const accountForm=reactive({name:'',loading:false});
 const currentTime=ref('');
 const allModels=['doubao','doubao-quick','doubao-think','doubao-auto','doubao-expert','doubao-pro','doubao-image','doubao-video','doubao-music'];
 const qrColor=computed(()=>({'text-green-400':qr.st==='success'||qr.st==='confirmed','text-yellow-400':qr.st==='scanned','text-slate-400':qr.st==='waiting_scan','text-red-400':qr.st==='expired'||qr.st==='failed'}));
@@ -258,6 +334,25 @@ async function fetchSystem(){try{sysInfo.value=await api('/admin/api/system')}ca
 async function fetchCookies(){try{const d=await api('/admin/api/cookies');cookieData.cookies=d.cookies||[];cookieData.total=d.total||0;cookieData.file=d.session_file||null}catch(e){}}
 async function fetchLogs(){try{logs.value=(await api('/admin/api/logs')).reverse()}catch(e){}}
 async function fetchOverview(){fetchSession();fetchSystem();fetchCookies()}
+async function fetchAccounts(){try{accountData.value=await api('/admin/api/accounts')}catch(e){accountData.value={accounts:[],total:0,healthy:0}}}
+async function toggleAccount(name){try{await api('/admin/api/accounts/'+encodeURIComponent(name)+'/toggle',{method:'POST'})}catch(e){}fetchAccounts()}
+async function probeAccount(name){try{const r=await api('/admin/api/accounts/'+encodeURIComponent(name)+'/probe',{method:'POST'});alert(r.status==='healthy'?('探活成功 ('+r.ms+'ms): '+(r.text||'')):('探活失败: '+(r.error||r.message||'unknown')))}catch(e){alert('请求失败: '+e.message)}}
+async function deleteAccount(name){if(!confirm('确定删除账号 '+name+' ?'))return;try{await api('/admin/api/accounts/'+encodeURIComponent(name),{method:'DELETE'})}catch(e){}fetchAccounts();fetchChannel()}
+async function addAccount(){
+  const fileInput=document.getElementById('acct-file');
+  if(!fileInput||!fileInput.files.length){alert('请选择 session JSON 文件');return}
+  accountForm.loading=true;
+  try{
+    const fd=new FormData();
+    fd.append('file',fileInput.files[0]);
+    if(accountForm.name)fd.append('name',accountForm.name);
+    const r=await fetch(API+'/admin/api/accounts',{headers:{'Authorization':'Bearer '+key},method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'HTTP '+r.status);
+    accountForm.name='';fileInput.value='';
+    fetchAccounts();fetchChannel();
+  }catch(e){alert('添加失败: '+e.message)}finally{accountForm.loading=false}}
+async function fetchChannel(){try{channelData.value=await api('/admin/api/channel')}catch(e){}}
 let qrPoll=null;
 async function startQr(){qr.img='';qr.st='';qr.text='生成中...';
 try{const r=await api('/v1/session/qr-login',{method:'POST'});
@@ -304,11 +399,13 @@ const msg=r.choices?.[0]?.message||{};test.output=msg.content||JSON.stringify(r,
 if(msg.reasoning_content)test.thinking=msg.reasoning_content;if(r.search_results)test.searchResults=r.search_results;test.ms=Date.now()-t0;
 }}catch(e){test.error=e.message}finally{test.loading=false}}
 setInterval(()=>{currentTime.value=new Date().toLocaleTimeString('zh-CN',{hour12:false})},1000);
-onMounted(()=>{fetchOverview();fetchLogs();currentTime.value=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+onMounted(()=>{fetchOverview();fetchLogs();fetchAccounts();fetchChannel();currentTime.value=new Date().toLocaleTimeString('zh-CN',{hour12:false});
 setInterval(()=>{if(activeTab.value===0)fetchSession()},10000);
 setInterval(()=>{if(activeTab.value===3)fetchLogs()},5000)});
 return{tabs,icons,activeTab,session,sysInfo,cookieData,probe,qr,qrColor,test,logs,allModels,currentTime,screenshot,
-fmtDur,fmtTime,fetchOverview,probeSession,fetchLogs,startQr,loadVnc,takeScreenshot,runTest}}}).mount('#app');
+accountData,channelData,accountForm,
+fmtDur,fmtTime,fetchOverview,probeSession,fetchLogs,startQr,loadVnc,takeScreenshot,runTest,
+fetchAccounts,toggleAccount,probeAccount,deleteAccount,addAccount,fetchChannel}}}).mount('#app');
 </script>
 </body>
 </html>
