@@ -1031,6 +1031,72 @@ server {
 | `DOUBAO_BROWSER_DATA` | `~/.doubao_browser` | Chromium 持久化用户目录 |
 | `DOUBAO_NOVNC_URL` | 自动推断 | Admin 面板中的 noVNC 地址 |
 | `DOUBAO_NOVNC_PASSWORD` | 空 | 自动拼接到 noVNC URL 的密码参数 |
+| `DOUBAO_ACCOUNTS_DIR` | `./accounts` | 多账号 session 目录（见下方「多账号免费池」） |
+| `DOUBAO_COOKIE` | 空 | Cookie 头方式创建单账号（仅在目录中无任何 session 文件时生效） |
+| `DOUBAO_VIDEO_CHANNEL` | `free` | 默认视频通道：`free` 或 `volc` |
+| `VOLC_API_KEY` | 空 | 火山引擎官方 API Key（设置后启用 `volc-*` 模型） |
+| `VOLC_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 火山引擎 API 地址 |
+| `VOLC_CHAT_MODEL` | `doubao-pro-32k-250715` | 官方通道聊天模型 |
+| `VOLC_IMAGE_MODEL` | `doubao-seedream-5-0-pro-260128` | 官方通道图片模型 |
+| `VOLC_VIDEO_MODEL` | `doubao-seedance-1-5-pro-251215` | 官方通道视频模型 |
+
+## 多账号免费池与官方通道
+
+在原单账号模式基础上，本项目扩展了两条通道，可同时使用：
+
+### 免费账号池（多账号轮询）
+
+1. 在项目根目录建一个 `accounts/` 目录；
+2. 每个豆包账号导出一份 session JSON（格式同 `.doubao_session.json`），放入该目录，如：
+
+```
+accounts/
+├── 主号.json
+├── 备号.json
+└── ...
+```
+
+3. 启动服务即可。所有 `doubao*` 模型的请求会在健康账号间**轮询**：
+   - 单账号风控（710022004 验证码）/ 连续失败 ≥5 次会自动跳过或停用；
+   - 视频生成成功后按账号累计当日额度（Admin 面板可见）；
+   - 同步类操作失败自动标记账号，视频生成不自动重试已提交的任务（避免重复消耗额度）。
+
+可选的 `accounts.json` 配置文件（放根目录或 accounts 目录）可自定义名称/权重/启停：
+
+```json
+{
+  "accounts": [
+    { "name": "主号", "session_file": "main.json", "enabled": true, "weight": 2 }
+  ]
+}
+```
+
+兼容行为：根目录存在 `.doubao_session.json` 时自动导入为 `default` 账号；设置了 `DOUBAO_COOKIE` 且无任何 session 文件时自动创建 `env` 账号；两者都没有时保持原有浏览器扫码登录模式。
+
+### 火山引擎官方通道
+
+设置环境变量后即启用官方模型：
+
+```bash
+export VOLC_API_KEY=your-api-key
+# 可选：
+# export VOLC_VIDEO_MODEL=doubao-seedance-2-0-260128
+```
+
+新增模型 ID：
+
+| 模型 ID | 通道 | 说明 |
+|---------|------|------|
+| `doubao` / `doubao-think` / `doubao-expert` / `doubao-image` / `doubao-video` / `doubao-music` | 免费池 | 原有能力，走多账号轮询 |
+| `volc-chat` / `volc-image` / `volc-video` | 官方 | 走火山引擎 OpenAI 兼容接口；`volc-video` 内部自动完成异步任务的提交与轮询 |
+
+路由规则：`doubao*` 优先免费池 → 浏览器单账号 → 官方通道；`volc*` 固定走官方。
+
+### Admin 面板新功能
+
+- **账号管理 Tab**：查看每个账号的健康状态、成功/失败计数、连续失败、风控标记、当日额度；支持上传 session 文件添加账号、启用/停用、单个探活、删除。
+- **通道配置 Tab**：查看免费池与官方通道的配置状态和默认通道。
+
 
 ### 认证
 
