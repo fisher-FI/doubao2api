@@ -70,7 +70,7 @@ FastAPI（现有 unified_server.py）
   - 对同步操作（chat、image、music）可自动重试下一个健康账号。
   - 对视频生成（异步任务）只重试连接/认证阶段错误，不重试已创建任务后的错误，避免重复消耗额度。
 - **后向兼容**：
-  - `accounts/` 不存在且无 `DOUBAO_API_KEY` 配置时，启动原有单账号 `BrowserClient` 模式。
+  - `accounts/` 不存在且未配置任何账号时，启动原有单账号 `BrowserClient` 模式。
   - 根目录存在 `.doubao_session.json` 时，自动导入为 `default` 账号。
   - 设置 `DOUBAO_COOKIE` 环境变量时，自动创建一个账号。
 
