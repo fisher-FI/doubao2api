@@ -25,11 +25,12 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
-from . import BrowserClient, DoubaoChatClient
+from .browser_client import BrowserClient
 from .account_pool import AccountEntry, AccountPool
 from .client import (
     CompletionChunk,
     CompletionResult,
+    DoubaoChatClient,
     UploadedFile,
 )
 from .volcano import VolcanoClient

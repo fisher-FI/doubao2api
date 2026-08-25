@@ -16,7 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import DoubaoChatClient
+from .client import DoubaoChatClient
 
 log = logging.getLogger(__name__)
 

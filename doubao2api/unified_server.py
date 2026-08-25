@@ -28,8 +28,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from .account_pool import AccountPool
+from .backends import FreeAccountBackend, VolcanoBackend
 from .browser_client import BrowserClient
 from .qianwen_client import QianwenClient, QIANWEN_MODELS
+from .volcano import VolcanoClient
 from .tool_calling import (
     build_tool_system_prompt,
     convert_messages_with_tools,
@@ -228,6 +231,8 @@ def create_app(
 
     _browser: Dict[str, Any] = {}  # holds BrowserClient instance
     _qianwen: Dict[str, Any] = {}  # holds QianwenClient instance
+    _pool: Dict[str, Any] = {}     # holds AccountPool + FreeAccountBackend
+    _volcano: Dict[str, Any] = {}  # holds VolcanoClient + VolcanoBackend
 
     async def _browser_watchdog():
         """Background task: check browser health every 30s, auto-restart on crash."""
@@ -291,6 +296,28 @@ def create_app(
                 log.warning("Qianwen client failed to start: %s", e)
                 qw_client = None
 
+        # ── Multi-account free-account pool ──
+        accounts_dir = os.environ.get("DOUBAO_ACCOUNTS_DIR", "./accounts")
+        pool = AccountPool(accounts_dir=accounts_dir)
+        pool.load_accounts()
+        if pool.total_count > 0:
+            await pool.start()
+            _pool["pool"] = pool
+            log.info(
+                "Account pool loaded with %d accounts (%d healthy)",
+                pool.total_count, pool.healthy_count,
+            )
+        else:
+            log.info("No account pool configured, falling back to BrowserClient")
+
+        # ── Volcano Engine official channel ──
+        volc_api_key = os.environ.get("VOLC_API_KEY", "")
+        if volc_api_key:
+            volc = VolcanoClient(api_key=volc_api_key)
+            _volcano["client"] = volc
+            _volcano["volcano_backend"] = VolcanoBackend(volc)
+            log.info("Volcano Engine configured")
+
         yield
 
         # Shutdown
@@ -301,6 +328,15 @@ def create_app(
         qw = _qianwen.pop("client", None)
         if qw:
             await qw.stop()
+        pool_obj = _pool.pop("pool", None)
+        if pool_obj:
+            await pool_obj.stop()
+        volc = _volcano.pop("client", None)
+        if volc:
+            try:
+                await volc.close()
+            except Exception:
+                pass
 
     app = FastAPI(title="Doubao API", version="1.0.0", lifespan=lifespan)
 
@@ -371,6 +407,33 @@ def create_app(
             raise HTTPException(status_code=503, detail="Qianwen client not ready")
         return client
 
+    def _get_backend(model: str = "doubao") -> Any:
+        """Return the appropriate backend for the given model name."""
+        if isinstance(model, str) and model.startswith("volc-"):
+            volc_backend = _volcano.get("volcano_backend")
+            if volc_backend is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Volcano Engine not configured (set VOLC_API_KEY)",
+                )
+            return volc_backend
+        # doubao-* models → free account pool or fallback BrowserClient/Volcano
+        pool = _pool.get("pool")
+        if pool and pool.healthy_count > 0:
+            free_backend = _pool.get("free_backend")
+            if free_backend is None:
+                free_backend = FreeAccountBackend(pool)
+                _pool["free_backend"] = free_backend
+            return free_backend
+        # Fallback to BrowserClient if logged in; otherwise official API
+        browser = _browser.get("client")
+        if browser and browser.is_ready:
+            return _get_client()
+        volc_backend = _volcano.get("volcano_backend")
+        if volc_backend:
+            return volc_backend
+        return _get_client()
+
     # ── Prompt extraction ──
 
     def _extract_prompt(messages: List[_Message]) -> str:
@@ -424,7 +487,7 @@ def create_app(
                         file_refs.append(file_url)
         return "\n".join(parts), file_refs
 
-    async def _materialize_file_refs(client: BrowserClient, file_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def _materialize_file_refs(backend: Any, file_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Resolve TOS/data/http file_url references to uploaded file metadata."""
         import base64
         import mimetypes
@@ -449,7 +512,7 @@ def create_app(
                     mime_type = header[5:].split(";", 1)[0]
                     ext = mimetypes.guess_extension(mime_type) or ".txt"
                     name = f"upload{ext}"
-                uploaded = await client.upload_file(file_data=file_data, filename=name)
+                uploaded = await backend.upload_file(file_data=file_data, filename=name)
                 files.append({"uri": uploaded["uri"], "name": uploaded["name"], "size": uploaded["size"]})
                 continue
             if url.startswith("http://") or url.startswith("https://"):
@@ -461,7 +524,7 @@ def create_app(
                     response = await http_client.get(url)
                     response.raise_for_status()
                     file_data = response.content
-                uploaded = await client.upload_file(file_data=file_data, filename=name)
+                uploaded = await backend.upload_file(file_data=file_data, filename=name)
                 files.append({"uri": uploaded["uri"], "name": uploaded["name"], "size": uploaded["size"]})
                 continue
             raise HTTPException(status_code=400, detail=f"Unsupported file_url: {url[:80]}")
@@ -490,13 +553,26 @@ def create_app(
 
     @app.get("/health")
     async def health():
+        pool = _pool.get("pool")
+        volc_backend = _volcano.get("volcano_backend")
+        result = {
+            "status": "ok",
+            "pool_ready": bool(pool) and pool.healthy_count > 0,
+            "pool_total": pool.total_count if pool else 0,
+            "pool_healthy": pool.healthy_count if pool else 0,
+            "volcano_configured": bool(volc_backend) and volc_backend.is_ready,
+        }
+        # Legacy browser fields (backward compat)
         client = _browser.get("client")
         ready = client.is_ready if client else False
-        result = {"status": "ok" if ready else "not_ready", "logged_in": ready}
+        result["logged_in"] = ready
+        result["browser_ready"] = ready
         if client:
             result["consecutive_failures"] = client.consecutive_failures
             result["needs_captcha"] = client.needs_captcha
             result["last_error_code"] = client.last_error_code
+        if not (result["pool_ready"] or ready or result["volcano_configured"]):
+            result["status"] = "not_ready"
         result["expert_degraded"] = _expert_tracker.is_degraded
         # Qianwen status
         qw = _qianwen.get("client")
@@ -506,7 +582,26 @@ def create_app(
     @app.get("/v1/models")
     async def list_models(request: Request):
         _check_auth(request)
-        return {"object": "list", "data": ALL_MODELS}
+        models = [
+            {"id": m, "object": "model", "owned_by": "doubao", "created": 0}
+            for m in CHAT_MODELS
+        ] + [
+            {"id": m, "object": "model", "owned_by": "qianwen", "created": 0}
+            for m in QIANWEN_MODELS
+        ] + [
+            {"id": "doubao-image", "object": "model", "owned_by": "doubao", "created": 0},
+            {"id": "doubao-music", "object": "model", "owned_by": "doubao", "created": 0},
+            {"id": "doubao-video", "object": "model", "owned_by": "doubao", "created": 0},
+        ]
+        # Add Volcano models if configured
+        volc_backend = _volcano.get("volcano_backend")
+        if volc_backend and volc_backend.is_ready:
+            models += [
+                {"id": "volc-chat", "object": "model", "owned_by": "volcano", "created": 0},
+                {"id": "volc-image", "object": "model", "owned_by": "volcano", "created": 0},
+                {"id": "volc-video", "object": "model", "owned_by": "volcano", "created": 0},
+            ]
+        return {"object": "list", "data": models}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(body: ChatCompletionRequest, request: Request):
@@ -526,20 +621,23 @@ def create_app(
             messages_raw = [m.model_dump(exclude_none=True) for m in body.messages]
             prompt = convert_messages_with_tools(messages_raw, body.tools)
         else:
-            use_deep_think = CHAT_MODELS.get(body.model)
-            if use_deep_think is None:
-                all_models = list(CHAT_MODELS.keys()) + list(QIANWEN_MODEL_NAMES)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown model '{body.model}'. Available: {', '.join(all_models)}",
-                )
+            if isinstance(body.model, str) and body.model.startswith("volc-"):
+                use_deep_think = 0  # volcano models don't use deep-think levels
+            else:
+                use_deep_think = CHAT_MODELS.get(body.model)
+                if use_deep_think is None:
+                    all_models = list(CHAT_MODELS.keys()) + list(QIANWEN_MODEL_NAMES)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unknown model '{body.model}'. Available: {', '.join(all_models)}",
+                    )
             model_name = body.model
             prompt, file_refs = _extract_prompt_and_file_refs(body.messages)
             if not prompt:
                 raise HTTPException(status_code=400, detail="No text content")
 
         await bucket.acquire()
-        client = _get_client()
+        backend = _get_backend(model_name)
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
         if body.stream:
@@ -551,7 +649,7 @@ def create_app(
                         detail="file_url attachments are currently supported for non-streaming requests only",
                     )
             return StreamingResponse(
-                _stream_chat(client, prompt, use_deep_think, request_id, model_name,
+                _stream_chat(backend, prompt, use_deep_think, request_id, model_name,
                              conversation_id=body.conversation_id, bot_id=body.bot_id,
                              has_tools=has_tools,
                              messages_for_counting=body.messages),
@@ -564,7 +662,7 @@ def create_app(
             if has_tools:
                 # Tool calling non-streaming path
                 message = await _collect_chat_response(
-                    client, prompt, use_deep_think,
+                    backend, prompt, use_deep_think,
                     conversation_id=body.conversation_id, bot_id=body.bot_id,
                 )
                 # Report to expert tracker (detect silent downgrade)
@@ -584,8 +682,8 @@ def create_app(
                 else:
                     finish_reason = "stop"
             elif file_refs:
-                files = await _materialize_file_refs(client, file_refs)
-                result = await client.chat_with_file(
+                files = await _materialize_file_refs(backend, file_refs)
+                result = await backend.chat_with_file(
                     text=prompt,
                     file_uri=files,
                     file_name=files[0]["name"],
@@ -596,7 +694,7 @@ def create_app(
                 finish_reason = "stop"
             else:
                 message = await _collect_chat_response(
-                    client, prompt, use_deep_think,
+                    backend, prompt, use_deep_think,
                     conversation_id=body.conversation_id, bot_id=body.bot_id,
                 )
                 finish_reason = "stop"
@@ -954,12 +1052,12 @@ def create_app(
     async def image_generations(body: ImageGenerationRequest, request: Request):
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
+        backend = _get_backend(body.model)
 
         ratio = body.ratio or _size_to_ratio(body.size)
 
         try:
-            result = await client.generate_image(
+            result = await backend.generate_image(
                 prompt=body.prompt,
                 ratio=ratio,
                 ref_image_key=body.ref_image_key,
@@ -990,15 +1088,16 @@ def create_app(
     async def audio_generations(request: Request):
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
 
         body = await request.json()
         prompt = body.get("prompt", "")
         if not prompt:
             raise HTTPException(status_code=400, detail="Missing prompt")
+        model = body.get("model", "doubao-music")
+        backend = _get_backend(model)
 
         try:
-            result = await client.generate_music(
+            result = await backend.generate_music(
                 prompt=prompt,
                 lyric=body.get("lyric"),
                 genre=body.get("genre"),
@@ -1021,19 +1120,20 @@ def create_app(
     async def video_generations(request: Request):
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
 
         body = await request.json()
         prompt = body.get("prompt", "")
         if not prompt:
             raise HTTPException(status_code=400, detail="Missing prompt")
+        model = body.get("model", "doubao-video")
+        backend = _get_backend(model)
 
         ratio = body.get("ratio") or body.get("size")
         if ratio and "x" in str(ratio):
             ratio = _size_to_ratio(ratio)
 
         try:
-            result = await client.generate_video(
+            result = await backend.generate_video(
                 prompt=prompt, ratio=ratio,
             )
         except RuntimeError as exc:
@@ -1056,7 +1156,7 @@ def create_app(
         """Upload a file. Returns file metadata for use in chat."""
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
+        backend = _get_backend("doubao")
 
         form = await request.form()
         file_field = form.get("file")
@@ -1067,7 +1167,7 @@ def create_app(
         filename = file_field.filename or "file.txt"
 
         try:
-            result = await client.upload_file(file_data, filename)
+            result = await backend.upload_file(file_data, filename)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1086,9 +1186,9 @@ def create_app(
     async def file_download(request: Request, uri: str, expire: int = 3600):
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
+        backend = _get_backend("doubao")
         try:
-            url = await client.get_file_download_url(uri=uri, expire_seconds=expire)
+            url = await backend.get_file_download_url(uri=uri, expire_seconds=expire)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
         return JSONResponse({"url": url, "uri": uri, "expires_in": expire})
@@ -1097,7 +1197,7 @@ def create_app(
     async def upload_image(request: Request):
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
+        backend = _get_backend("doubao")
         form = await request.form()
         upload = form.get("file") or form.get("image")
         if not upload:
@@ -1105,7 +1205,7 @@ def create_app(
         image_data = await upload.read()
         filename = upload.filename or "image.png"
         try:
-            result = await client.upload_image(image_bytes=image_data, filename=filename)
+            result = await backend.upload_image(image_bytes=image_data, filename=filename)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
         return JSONResponse({
@@ -1123,7 +1223,6 @@ def create_app(
         """Chat with file attachment. Body: {file_id, prompt, model}."""
         _check_auth(request)
         await bucket.acquire()
-        client = _get_client()
 
         body = await request.json()
         file_id = body.get("file_id", "")
@@ -1135,10 +1234,11 @@ def create_app(
         if not file_id or not prompt:
             raise HTTPException(status_code=400, detail="Missing file_id or prompt")
 
+        backend = _get_backend(model)
         use_deep_think = CHAT_MODELS.get(model, 0)
 
         try:
-            result = await client.chat_with_file(
+            result = await backend.chat_with_file(
                 text=prompt,
                 file_uri=file_id,
                 file_name=file_name,
@@ -1163,7 +1263,7 @@ def create_app(
         })
 
     async def _collect_chat_response(
-        client: BrowserClient,
+        backend: Any,
         prompt: str,
         use_deep_think: int,
         *,
@@ -1190,7 +1290,7 @@ def create_app(
             if isinstance(dc, dict):
                 yield from dc.get("content_block", [])
 
-        async for event in client.chat_completion(
+        async for event in backend.chat_completion(
             prompt, use_deep_think=use_deep_think,
             conversation_id=conversation_id or None,
             bot_id=bot_id or None,
@@ -1203,12 +1303,12 @@ def create_app(
             if event.get("error_code"):
                 code = event.get("error_code", 0)
                 msg = event.get("error_msg", "")
-                client.record_failure(code)
+                backend.record_failure(code)
                 raise RuntimeError(f"Error code={code}: {msg}")
 
             # Extract conversation_id for multi-turn
             if not result_conversation_id:
-                cid = client.extract_conversation_id(event)
+                cid = backend.extract_conversation_id(event)
                 if cid and cid != "0":
                     result_conversation_id = cid
 
@@ -1268,11 +1368,11 @@ def create_app(
             message["reasoning_content"] = "".join(thinking_parts)
         if result_conversation_id:
             message["conversation_id"] = result_conversation_id
-        client.record_success()
+        backend.record_success()
         return message
 
     async def _stream_chat(
-        client: BrowserClient,
+        backend: Any,
         prompt: str,
         use_deep_think: int,
         request_id: str,
@@ -1327,7 +1427,7 @@ def create_app(
                 yield from dc.get("content_block", [])
 
         try:
-            async for event in client.chat_completion(
+            async for event in backend.chat_completion(
                 prompt, use_deep_think=use_deep_think,
                 conversation_id=conversation_id or None,
                 bot_id=bot_id or None,
@@ -1344,7 +1444,7 @@ def create_app(
 
                 # --- Extract conversation_id for multi-turn ---
                 if not result_conversation_id:
-                    cid = client.extract_conversation_id(event)
+                    cid = backend.extract_conversation_id(event)
                     if cid and cid != "0":
                         result_conversation_id = cid
 
@@ -1352,7 +1452,7 @@ def create_app(
                 if event_type == "STREAM_ERROR" or event.get("error_code"):
                     code = event.get("error_code", 0)
                     msg = event.get("error_msg", "unknown error")
-                    client.record_failure(code)
+                    backend.record_failure(code)
                     chunk = _make_chunk(
                         {"content": f"[Error code={code}: {msg}]"}
                     )
@@ -1594,7 +1694,7 @@ def create_app(
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
         # Final chunk with usage
-        client.record_success()
+        backend.record_success()
         # Report to expert tracker for degradation detection
         if has_tools and use_deep_think >= 1:
             _expert_tracker.report_response(had_reasoning_content)
@@ -1675,6 +1775,137 @@ def create_app(
         _check_auth(request)
         return JSONResponse(list(_REQUEST_LOG))
 
+    # ── Account Management API ──
+
+    @app.get("/admin/api/accounts")
+    async def admin_list_accounts(request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        if not pool:
+            return JSONResponse({"accounts": [], "total": 0, "healthy": 0,
+                                 "message": "No account pool configured"})
+        return JSONResponse({
+            "accounts": [a.to_dict() for a in pool.accounts],
+            "total": pool.total_count,
+            "healthy": pool.healthy_count,
+        })
+
+    @app.post("/admin/api/accounts")
+    async def admin_add_account(request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        if not pool:
+            raise HTTPException(status_code=503, detail="Account pool not initialized")
+        form = await request.form()
+        upload_field = form.get("file")
+        session_file_path = str(form.get("session_file", "") or "").strip()
+        name = str(form.get("name", "") or "").strip()
+        if not upload_field and not session_file_path:
+            raise HTTPException(status_code=400, detail="Missing file or session_file")
+
+        accounts_dir = os.environ.get("DOUBAO_ACCOUNTS_DIR", "./accounts")
+        os.makedirs(accounts_dir, exist_ok=True)
+
+        if upload_field is not None:
+            content = await upload_field.read()
+            if not name:
+                name = os.path.splitext(upload_field.filename or "account")[0]
+            dest = os.path.join(accounts_dir, f"{name}.json")
+            with open(dest, "wb") as f:
+                f.write(content)
+        else:
+            if not os.path.exists(session_file_path):
+                raise HTTPException(status_code=400, detail=f"Session file not found: {session_file_path}")
+            if not name:
+                name = os.path.splitext(os.path.basename(session_file_path))[0]
+            dest = os.path.join(accounts_dir, f"{name}.json")
+            with open(session_file_path, "rb") as src, open(dest, "wb") as dst:
+                dst.write(src.read())
+
+        # Reload pool and rebuild clients
+        pool.load_accounts()
+        await pool.start()
+        _pool.pop("free_backend", None)
+        return JSONResponse({"status": "ok", "name": name, "session_file": dest})
+
+    @app.delete("/admin/api/accounts/{name}")
+    async def admin_delete_account(name: str, request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        if not pool:
+            raise HTTPException(status_code=503, detail="Account pool not initialized")
+        entry = pool.get_by_name(name)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+        # Close its client before removal
+        if entry.client:
+            try:
+                await entry.client.__aexit__(None, None, None)
+            except Exception:
+                pass
+        pool._accounts = [a for a in pool._accounts if a.name != name]
+        # Remove session file
+        try:
+            if os.path.exists(entry.session_file):
+                os.remove(entry.session_file)
+        except OSError as exc:
+            log.warning("Failed to remove session file %s: %s", entry.session_file, exc)
+        await pool.start()
+        _pool.pop("free_backend", None)
+        return JSONResponse({"status": "ok"})
+
+    @app.post("/admin/api/accounts/{name}/toggle")
+    async def admin_toggle_account(name: str, request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        if not pool:
+            raise HTTPException(status_code=503, detail="Account pool not initialized")
+        entry = pool.get_by_name(name)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+        entry.enabled = not entry.enabled
+        return JSONResponse({"status": "ok", "name": name, "enabled": entry.enabled})
+
+    @app.post("/admin/api/accounts/{name}/probe")
+    async def admin_probe_account(name: str, request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        if not pool:
+            raise HTTPException(status_code=503, detail="Account pool not initialized")
+        entry = pool.get_by_name(name)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Account '{name}' not found")
+        if not entry.client:
+            raise HTTPException(status_code=503, detail="Account client not initialized")
+        try:
+            t0 = time.time()
+            result = await entry.client.chat_completion(
+                text="1+1=?只回答数字", need_deep_think=0,
+            )
+            ms = int((time.time() - t0) * 1000)
+            entry.mark_success()
+            return JSONResponse({"status": "healthy", "ms": ms, "text": result.text[:100]})
+        except Exception as e:
+            return JSONResponse({"status": "error", "error": str(e)[:200]})
+
+    @app.get("/admin/api/channel")
+    async def admin_channel_status(request: Request):
+        _check_auth(request)
+        pool = _pool.get("pool")
+        volc_backend = _volcano.get("volcano_backend")
+        return JSONResponse({
+            "free_accounts": {
+                "configured": bool(pool) and pool.total_count > 0,
+                "total": pool.total_count if pool else 0,
+                "healthy": pool.healthy_count if pool else 0,
+            },
+            "volcano": {
+                "configured": bool(volc_backend) and volc_backend.is_ready,
+                "api_key_set": bool(os.environ.get("VOLC_API_KEY", "")),
+            },
+            "default_channel": os.environ.get("DOUBAO_VIDEO_CHANNEL", "free"),
+        })
+
     @app.get("/admin/api/cookies")
     async def admin_cookies(request: Request):
         """Return current browser cookies."""
@@ -1696,12 +1927,15 @@ def create_app(
     async def admin_probe(request: Request):
         """Probe session by making a real chat request."""
         _check_auth(request)
-        client = _browser.get("client")
-        if client is None or not client.is_ready:
+        try:
+            backend = _get_backend("doubao")
+        except HTTPException as exc:
+            return JSONResponse({"status": "error", "message": exc.detail})
+        if not getattr(backend, "is_ready", True):
             return JSONResponse({"status": "error", "message": "未登录"})
         try:
             t0 = time.time()
-            result = await client.chat("1+1=?只回答数字", use_deep_think=0)
+            result = await backend.chat("1+1=?只回答数字", use_deep_think=0)
             ms = int((time.time() - t0) * 1000)
             content = result.get("text", "")
             return JSONResponse({"status": "healthy", "ms": ms, "response": content[:100]})
