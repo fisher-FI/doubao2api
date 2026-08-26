@@ -64,6 +64,9 @@ async def download_image_bytes(url: str, max_mb: float = 20.0) -> "tuple[bytes, 
             header, encoded = url.split(",", 1)
         except ValueError as exc:
             raise RuntimeError("Invalid data URI") from exc
+        # Pre-decode size guard (~20MB decoded ≈ 27MB base64 chars)
+        if len(encoded) > int(max_mb * 1024 * 1024 * 1.4):
+            raise RuntimeError(f"Image too large (> {max_mb}MB)")
         mime = header[5:].split(";", 1)[0] if len(header) > 5 else "image/png"
         ext = _IMAGE_EXT_BY_MIME.get(mime, ".png")
         try:

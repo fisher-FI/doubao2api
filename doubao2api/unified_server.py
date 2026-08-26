@@ -1233,7 +1233,10 @@ def create_app(
                     mime = _mimetypes.guess_type(name)[0] or "image/png"
                     uploads.append(f"data:{mime};base64,{_b64.b64encode(data).decode()}")
         else:
-            raw = await request.json()
+            try:
+                raw = await request.json()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
             if isinstance(raw, dict):
                 body.update(raw)
 
@@ -2072,22 +2075,42 @@ def create_app(
         if not upload_field and not session_file_path:
             raise HTTPException(status_code=400, detail="Missing file or session_file")
 
+        # Path-traversal guard: keep only the bare filename part
+        def _safe_stem(raw: str) -> str:
+            stem = os.path.splitext(os.path.basename(raw.replace("\\", "/")))[0]
+            stem = "".join(c for c in stem if c not in '/\\:*?"<>|').strip()
+            return stem
+
+        import json as _json
+
         accounts_dir = os.environ.get("DOUBAO_ACCOUNTS_DIR", "./accounts")
         os.makedirs(accounts_dir, exist_ok=True)
 
         if upload_field is not None:
             content = await upload_field.read()
             if not name:
-                name = os.path.splitext(upload_field.filename or "account")[0]
-            dest = os.path.join(accounts_dir, f"{name}.json")
-            with open(dest, "wb") as f:
-                f.write(content)
+                name = _safe_stem(upload_field.filename or "account")
+            try:
+                parsed = _json.loads(content.decode("utf-8"))
+                if not isinstance(parsed, dict) or "cookies" not in parsed:
+                    raise ValueError
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail='Invalid session JSON: expected {"cookies": {...}, ...}',
+                )
         else:
             if not os.path.exists(session_file_path):
                 raise HTTPException(status_code=400, detail=f"Session file not found: {session_file_path}")
             if not name:
-                name = os.path.splitext(os.path.basename(session_file_path))[0]
-            dest = os.path.join(accounts_dir, f"{name}.json")
+                name = _safe_stem(os.path.basename(session_file_path))
+
+        name = _safe_stem(name) or "account"
+        dest = os.path.join(accounts_dir, f"{name}.json")
+        if upload_field is not None:
+            with open(dest, "wb") as f:
+                f.write(content)
+        else:
             with open(session_file_path, "rb") as src, open(dest, "wb") as dst:
                 dst.write(src.read())
 

@@ -1,5 +1,6 @@
 """Integration tests for server backend routing (no real network/browser)."""
 import json
+import os
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -420,3 +421,61 @@ def test_last_frame_on_doubao_returns_502(app_client):
     assert resp.status_code == 502
     assert "last-frame" in resp.json()["error"]["message"] or \
            "last-frame" in resp.text
+
+
+# ── Review-round hardening ──
+
+
+def test_invalid_json_body_returns_400(app_client):
+    resp = app_client.post(
+        "/v1/video/generations",
+        content=b"{not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_oversized_data_uri_rejected():
+    from doubao2api.backends import download_image_bytes
+
+    big = "A" * (30 * 1024 * 1024)  # 30M base64 chars ≈ 22MB+ decoded
+    with pytest.raises(RuntimeError, match="too large"):
+        await download_image_bytes(f"data:image/png;base64,{big}")
+
+
+def test_account_upload_sanitizes_traversal_name(tmp_path, monkeypatch):
+    """Malicious filename must not escape the accounts dir."""
+    acc_dir = tmp_path / "accounts"
+    acc_dir.mkdir()
+    # seed one valid account so the pool is initialized
+    seed = {"cookies": {"sessionid": "seed"}, "params": {}}
+    (acc_dir / "seed.json").write_text(json.dumps(seed), encoding="utf-8")
+    monkeypatch.setenv("DOUBAO_ACCOUNTS_DIR", str(acc_dir))
+    monkeypatch.delenv("VOLC_API_KEY", raising=False)
+
+    from doubao2api.browser_client import BrowserClient
+    evil_name = "..\\..\\evil"
+
+    good_session = json.dumps({"cookies": {"sessionid": "s"}, "params": {}})
+    with patch.object(BrowserClient, "start", new=AsyncMock(return_value=None)), \
+         patch.object(BrowserClient, "is_ready", new_callable=lambda: property(lambda self: False)):
+        app = us.create_app(api_key=None)
+        with TestClient(app) as c:
+            resp = c.post(
+                "/admin/api/accounts",
+                files={"file": (evil_name + ".json", good_session.encode(), "application/json")},
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            # sanitized name must be bare "evil", written inside acc_dir only
+            assert data["name"] == "evil"
+            assert str(acc_dir) in data["session_file"]
+            assert os.path.dirname(os.path.abspath(data["session_file"])) == str(acc_dir)
+            assert not (tmp_path / "evil.json").exists()
+            # invalid JSON must be rejected
+            bad = c.post(
+                "/admin/api/accounts",
+                files={"file": ("notjson.json", b"not json", "application/json")},
+            )
+            assert bad.status_code == 400
