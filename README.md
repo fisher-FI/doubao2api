@@ -44,6 +44,7 @@
     - [POST /v1/images/upload](#post-v1imagesupload)
     - [POST /v1/images/generations](#post-v1imagesgenerations)
     - [POST /v1/video/generations](#post-v1videogenerations)
+    - [POST /v1/video/generations/async （异步任务）](#post-v1videogenerationsasync-异步视频任务)
     - [POST /v1/audio/generations](#post-v1audiogenerations)
     - [GET /auth/status](#get-authstatus)
     - [POST /v1/session/qr-login](#post-v1sessionqr-login)
@@ -1678,6 +1679,45 @@ curl http://localhost:9090/v1/images/generations \
   ]
 }
 ```
+
+---
+
+#### POST /v1/video/generations/async （异步视频任务）
+
+视频生成默认是同步阻塞的（请求内等待 1–3 分钟）。异步模式提交后立即返回 `task_id`，适合前端页面或第三方集成。
+
+**1. 提交任务**：
+
+```bash
+curl -X POST http://localhost:9090/v1/video/generations/async \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"xyq-video","prompt":"海边日落延时","duration":15,"ratio":"16:9"}'
+```
+```json
+{"created": 1700000000, "task_id": "videotask-ab12cd34...", "status": "pending",
+ "message": "Poll GET /v1/video/generations/async/videotask-ab12cd34... for the result"}
+```
+
+- 通道未配置时在提交阶段即报 `503`（不会占用任务槽）。
+
+**2. 轮询结果** `GET /v1/video/generations/async/{task_id}`：
+
+```json
+{"created": 1700000000, "task_id": "videotask-ab12cd34...",
+ "status": "succeeded", "model": "xyq-video", "prompt": "海边日落延时",
+ "data": [{"video_url": "/xyq-files/sunset_15s_x.mp4", "duration": 15.0}]}
+```
+
+状态机：`pending → processing → succeeded | failed`。失败时含 `error` 字段；`xyq-*` 的 `video_url` 为本服务相对路径，直接 GET 即可下载。
+
+**3. 任务管理**：
+
+| 端点 | 说明 |
+|---|------|
+| `GET /v1/video/tasks` | 最近任务列表（新→旧，内存保留上限 200 条） |
+| `DELETE /v1/video/tasks/{task_id}` | 尽力取消并移除任务；已提交到服务商侧的任务可能仍消耗额度 |
+
+> 任务注册表保存在内存中，服务重启后未完成任务会丢失（已完成任务的下载文件仍在磁盘上）。
 
 ---
 

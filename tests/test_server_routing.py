@@ -1,5 +1,6 @@
 """Integration tests for server backend routing (no real network/browser)."""
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -13,6 +14,18 @@ from doubao2api.client import (
     VideoGenerationResult,
 )
 from doubao2api.volcano import VolcanoClient
+
+
+def _poll_task(c, task_id, timeout=5.0):
+    """Poll an async video task until it reaches a terminal state."""
+    deadline = time.time() + timeout
+    resp = None
+    while time.time() < deadline:
+        resp = c.get(f"/v1/video/generations/async/{task_id}").json()
+        if resp["status"] in ("succeeded", "failed", "cancelled"):
+            return resp
+        time.sleep(0.05)
+    return resp
 
 
 @pytest.fixture
@@ -207,3 +220,92 @@ def test_xyq_video_without_cookies_503(tmp_path, monkeypatch):
         with TestClient(app) as c:
             resp = c.post("/v1/video/generations", json={"prompt": "x", "model": "xyq-video"})
             assert resp.status_code == 503
+
+
+# ── Async video task API ──
+
+
+def test_async_video_task_success(app_client):
+    from doubao2api import DoubaoChatClient
+
+    async def _fake_video(*args, **kwargs):
+        return VideoGenerationResult(
+            videos=[GeneratedVideo(video_url="https://cdn/async.mp4", duration=5.0)],
+            prompt=kwargs.get("prompt", ""),
+        )
+
+    with patch.object(DoubaoChatClient, "generate_video", new=_fake_video):
+        resp = app_client.post("/v1/video/generations/async", json={"prompt": "a cat"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "pending"
+    assert body["task_id"].startswith("videotask-")
+
+    final = _poll_task(app_client, body["task_id"])
+    assert final["status"] == "succeeded"
+    assert final["data"][0]["video_url"] == "https://cdn/async.mp4"
+
+    # appears in the task list
+    listing = app_client.get("/v1/video/tasks").json()["data"]
+    assert any(t["task_id"] == body["task_id"] for t in listing)
+
+
+def test_async_video_task_failure(app_client):
+    from doubao2api import DoubaoChatClient
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    with patch.object(DoubaoChatClient, "generate_video", new=_boom):
+        resp = app_client.post("/v1/video/generations/async", json={"prompt": "cat"})
+    task_id = resp.json()["task_id"]
+
+    final = _poll_task(app_client, task_id)
+    assert final["status"] == "failed"
+    assert "boom" in final["error"]
+
+
+def test_async_video_missing_prompt_400(app_client):
+    resp = app_client.post("/v1/video/generations/async", json={})
+    assert resp.status_code == 400
+
+
+def test_async_video_unknown_task_404(app_client):
+    resp = app_client.get("/v1/video/generations/async/videotask-nonexistent")
+    assert resp.status_code == 404
+
+
+def test_async_video_unconfigured_channel_fails_fast(tmp_path, monkeypatch):
+    """volc-* without API key must fail at submit time, not consume a slot."""
+    monkeypatch.delenv("VOLC_API_KEY", raising=False)
+    monkeypatch.delenv("XYQ_COOKIES_DIR", raising=False)
+    empty = tmp_path / "empty_xyq"
+    empty.mkdir()
+    monkeypatch.setenv("XYQ_COOKIES_DIR", str(empty))
+    monkeypatch.delenv("DOUBAO_ACCOUNTS_DIR", raising=False)
+
+    from doubao2api.browser_client import BrowserClient
+    with patch.object(BrowserClient, "start", new=AsyncMock(return_value=None)), \
+         patch.object(BrowserClient, "is_ready", new_callable=lambda: property(lambda self: False)):
+        app = us.create_app(api_key=None)
+        with TestClient(app) as c:
+            resp = c.post("/v1/video/generations/async",
+                          json={"prompt": "x", "model": "volc-video"})
+            assert resp.status_code == 503
+
+
+def test_xyq_async_video_flow(xyq_app_client):
+    c = xyq_app_client
+    resp = c.post("/v1/video/generations/async", json={
+        "prompt": "sunset", "model": "xyq-video", "duration": 15,
+    })
+    assert resp.status_code == 200
+    final = _poll_task(c, resp.json()["task_id"])
+    assert final["status"] == "succeeded"
+    assert final["data"][0]["video_url"].startswith("/xyq-files/")
+    assert final["data"][0]["duration"] == 15.0
+
+
+def test_video_task_delete(app_client):
+    resp = app_client.delete("/v1/video/tasks/videotask-nope")
+    assert resp.status_code == 404

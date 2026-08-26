@@ -1205,6 +1205,145 @@ def create_app(
             "data": videos,
         })
 
+    # ── Async video task API ──
+    # POST /v1/video/generations/async          -> submit, returns task_id at once
+    # GET  /v1/video/generations/async/{id}     -> poll status/result
+    # GET  /v1/video/tasks                      -> list recent tasks (newest first)
+    # DELETE /v1/video/tasks/{id}               -> best-effort cancel + remove
+
+    _VIDEO_TASKS: Dict[str, Dict[str, Any]] = {}
+    _VIDEO_TASKS_MAX = 200
+
+    def _task_public(info: Dict[str, Any]) -> Dict[str, Any]:
+        out = {
+            "created": int(info.get("created_at") or 0),
+            "task_id": info["task_id"],
+            "status": info["status"],
+            "model": info.get("model"),
+            "prompt": info.get("prompt"),
+        }
+        if info.get("error"):
+            out["error"] = info["error"]
+        if info.get("result"):
+            out.update(info["result"])
+        return out
+
+    def _prune_video_tasks():
+        if len(_VIDEO_TASKS) <= _VIDEO_TASKS_MAX:
+            return
+        finished = [k for k, v in _VIDEO_TASKS.items()
+                    if v["status"] in ("succeeded", "failed")]
+        for k in sorted(finished, key=lambda k: _VIDEO_TASKS[k]["created_at"])[:len(_VIDEO_TASKS) - _VIDEO_TASKS_MAX]:
+            _VIDEO_TASKS.pop(k, None)
+
+    async def _run_video_task(task_id: str, body: Dict[str, Any]):
+        info = _VIDEO_TASKS.get(task_id)
+        if info is None:
+            return
+        info["status"] = "processing"
+        try:
+            await bucket.acquire()
+            model = body.get("model", "doubao-video")
+            backend = _get_backend(model)
+            prompt = body.get("prompt", "")
+            ratio = body.get("ratio") or body.get("size")
+            if ratio and "x" in str(ratio):
+                ratio = _size_to_ratio(ratio)
+            if model.startswith("xyq-"):
+                quality = "2.0" if model.endswith("-pro") else "fast"
+                result = await backend.generate_video(
+                    prompt=prompt, ratio=ratio,
+                    duration=body.get("duration", 10), quality=quality,
+                )
+            else:
+                result = await backend.generate_video(prompt=prompt, ratio=ratio)
+
+            videos = result.get("videos", [])
+            msg = result.get("message", "")
+            if not videos and msg:
+                info.update(status="failed", error=msg)
+            elif not videos:
+                info.update(status="failed", error="No videos generated")
+            else:
+                info.update(
+                    status="succeeded",
+                    result={"data": videos},
+                    finished_at=time.time(),
+                )
+        except HTTPException as exc:
+            info.update(status="failed", error=str(exc.detail), finished_at=time.time())
+        except asyncio.CancelledError:
+            info["status"] = "cancelled"
+            raise
+        except Exception as exc:
+            info.update(status="failed", error=str(exc)[:300], finished_at=time.time())
+
+    @app.post("/v1/video/generations/async")
+    async def video_generations_async(request: Request):
+        """Submit a video generation task; returns task_id immediately."""
+        _check_auth(request)
+        body = await request.json()
+        prompt = str(body.get("prompt", "")).strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Missing prompt")
+        model = body.get("model", "doubao-video")
+        # Fail fast on unconfigured channels (nothing consumed yet)
+        _get_backend(model)
+
+        task_id = f"videotask-{uuid.uuid4().hex[:24]}"
+        now = time.time()
+        info: Dict[str, Any] = {
+            "task_id": task_id,
+            "status": "pending",
+            "model": model,
+            "prompt": prompt[:120],
+            "created_at": now,
+            "finished_at": None,
+            "error": None,
+            "result": None,
+            "_asyncio": None,
+        }
+        _VIDEO_TASKS[task_id] = info
+        _prune_video_tasks()
+        info["_asyncio"] = asyncio.create_task(_run_video_task(task_id, body))
+        return JSONResponse({
+            "created": int(now),
+            "task_id": task_id,
+            "status": "pending",
+            "message": f"Poll GET /v1/video/generations/async/{task_id} for the result",
+        })
+
+    @app.get("/v1/video/generations/async/{task_id}")
+    async def video_task_status(task_id: str, request: Request):
+        _check_auth(request)
+        info = _VIDEO_TASKS.get(task_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return JSONResponse(_task_public(info))
+
+    @app.get("/v1/video/tasks")
+    async def video_tasks_list(request: Request):
+        _check_auth(request)
+        tasks = sorted(_VIDEO_TASKS.values(), key=lambda v: v["created_at"], reverse=True)
+        return JSONResponse({"object": "list", "data": [_task_public(t) for t in tasks]})
+
+    @app.delete("/v1/video/tasks/{task_id}")
+    async def video_task_cancel(task_id: str, request: Request):
+        _check_auth(request)
+        info = _VIDEO_TASKS.pop(task_id, None)
+        if info is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        t = info.get("_asyncio")
+        cancelled = False
+        if t is not None and not t.done():
+            t.cancel()
+            cancelled = True
+        return JSONResponse({
+            "status": "ok",
+            "cancelled_running_task": cancelled,
+            "note": "Provider-side jobs already submitted may still consume quota",
+        })
+
     @app.get("/xyq-files/{name}")
     async def xyq_file(name: str, request: Request):
         """Serve videos generated by the xiaoyunque channel from its output dir."""
