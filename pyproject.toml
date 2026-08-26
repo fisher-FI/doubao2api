@@ -33,6 +33,13 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
+[project.optional-dependencies]
+# Browser-based channels: single-account fallback + xiaoyquee Playwright engine
+browser = [
+    "playwright>=1.40",
+    "playwright-stealth>=1.0.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/wangchuxiaoji-oss/doubao2api"
 Repository = "https://github.com/wangchuxiaoji-oss/doubao2api"

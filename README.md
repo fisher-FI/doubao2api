@@ -102,10 +102,11 @@
 # 方式一：pip 安装（推荐）
 pip install git+https://github.com/wangchuxiaoji-oss/doubao2api.git
 
-# 方式二：从源码
+# 方式二：从源码（含浏览器通道依赖：单账号回退 + 小云雀引擎）
 git clone https://github.com/wangchuxiaoji-oss/doubao2api.git
 cd doubao2api
-pip install -e .
+pip install -e ".[browser]"
+playwright install chromium   # 首次需下载 Chromium
 ```
 
 ### Docker 部署（可选）
@@ -1078,6 +1079,10 @@ accounts/
 ```
 
 兼容行为：根目录存在 `.doubao_session.json` 时自动导入为 `default` 账号；设置了 `DOUBAO_COOKIE` 且无任何 session 文件时自动创建 `env` 账号；两者都没有时保持原有浏览器扫码登录模式。
+
+> ⚠️ **安全提示**：`accounts/`、`xyq_cookies/` 已在 `.gitignore` 中，请勿用 `-f` 强制添加——里面是账号登录凭据。
+>
+> ⚠️ **聊天多轮限制**：免费池通道（纯 HTTP 客户端）目前**忽略 `conversation_id` 多轮续聊**——每轮都是新会话，跨轮上下文不保留。需要真正多轮对话时使用浏览器单账号模式或官方 `volc-chat`。
 
 ### 火山引擎官方通道
 

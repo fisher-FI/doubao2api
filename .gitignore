@@ -2,6 +2,16 @@
 .doubao_session.json
 decrypted_cookies.json
 .env
+accounts/
+xyq_cookies/
+xyq_downloads/
+downloads/
+data/
+uploads/
+_smoke_accounts/
+_smoke_xyq_cookies/
+_boot_smoke.log
+*_session_*.json
 
 # Python
 __pycache__/
