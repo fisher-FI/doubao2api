@@ -150,6 +150,41 @@ async def test_extract_conversation_id_from_event():
 
 
 @pytest.mark.asyncio
+async def test_free_account_backend_image_to_video(tmp_path, monkeypatch):
+    import doubao2api.backends as backends_mod
+
+    async def _fake_download(url, max_mb=20.0):
+        return b"img", "ref.png"
+
+    monkeypatch.setattr(backends_mod, "download_image_bytes", _fake_download)
+
+    entry = AccountEntry(name="test", session_file="test.json", client=MagicMock())
+    entry.client.upload_image = AsyncMock(return_value={"uri": "tos-ref-1", "cdn_url": "x"})
+    entry.client.generate_video = AsyncMock(return_value=VideoGenerationResult(
+        videos=[GeneratedVideo(video_url="https://cdn/i2v.mp4", duration=5.0)],
+        prompt="cat",
+    ))
+    pool = _make_pool_with_entry(entry)
+    backend = FreeAccountBackend(pool)
+
+    result = await backend.generate_video("cat", ref_image_url="https://x/ref.png")
+    assert result["videos"][0]["video_url"] == "https://cdn/i2v.mp4"
+    # uploaded then passed as ref_image_key
+    entry.client.upload_image.assert_awaited_once()
+    kwargs = entry.client.generate_video.await_args.kwargs
+    assert kwargs["ref_image_key"] == "tos-ref-1"
+
+
+@pytest.mark.asyncio
+async def test_browser_backend_rejects_ref_image():
+    from doubao2api.backends import BrowserBackend
+
+    backend = BrowserBackend(MagicMock())
+    with pytest.raises(RuntimeError, match="does not support image-to-video"):
+        await backend.generate_video("cat", ref_image_url="https://x/a.png")
+
+
+@pytest.mark.asyncio
 async def test_volcano_backend_generate_video_dict():
     mock_client = MagicMock()
     mock_client.generate_video = AsyncMock(return_value=VideoGenerationResult(

@@ -102,6 +102,46 @@ async def test_generate_video_fails_on_failed_status(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_video_with_ref_image_in_content(monkeypatch):
+    monkeypatch.setattr("doubao2api.volcano.asyncio.sleep", AsyncMock())
+    client = VolcanoClient(api_key="test-key")
+
+    create_resp = MagicMock()
+    create_resp.status_code = 200
+    create_resp.raise_for_status = MagicMock()
+    create_resp.json = MagicMock(return_value={"id": "task-i2v"})
+
+    poll_resp = MagicMock()
+    poll_resp.status_code = 200
+    poll_resp.raise_for_status = MagicMock()
+    poll_resp.json = MagicMock(return_value={
+        "status": "succeeded", "data": [{"url": "https://cdn/v.mp4"}],
+    })
+
+    sent_payload = {}
+
+    async def _post(url, **kwargs):
+        sent_payload.update(kwargs["json"])
+        return create_resp
+
+    async def _get(url, **kwargs):
+        return poll_resp
+
+    mock_http = AsyncMock()
+    mock_http.post = _post
+    mock_http.get = _get
+    client._http = mock_http
+
+    result = await client.generate_video(
+        "a cat dancing", ref_image_url="https://example.com/cat.png",
+    )
+    assert result.videos[0].video_url == "https://cdn/v.mp4"
+    content = sent_payload["content"]
+    assert {"type": "text", "text": "a cat dancing"} in content
+    assert {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}} in content
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_parses_sse():
     client = VolcanoClient(api_key="test-key")
 

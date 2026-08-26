@@ -37,6 +37,56 @@ from .volcano import VolcanoClient
 
 log = logging.getLogger(__name__)
 
+_IMAGE_EXT_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
+
+async def download_image_bytes(url: str, max_mb: float = 20.0) -> "tuple[bytes, str]":
+    """Fetch a reference image from an http(s)/data URL.
+
+    Returns ``(bytes, filename)``. Raises RuntimeError on unsupported
+    schemes or oversized payloads.
+    """
+    import base64 as _b64
+
+    import httpx as _httpx
+
+    url = (url or "").strip()
+    if not url:
+        raise RuntimeError("Empty image URL")
+    if url.startswith("data:"):
+        try:
+            header, encoded = url.split(",", 1)
+        except ValueError as exc:
+            raise RuntimeError("Invalid data URI") from exc
+        mime = header[5:].split(";", 1)[0] if len(header) > 5 else "image/png"
+        ext = _IMAGE_EXT_BY_MIME.get(mime, ".png")
+        try:
+            data = _b64.b64decode(encoded)
+        except Exception as exc:
+            raise RuntimeError("Invalid base64 in data URI") from exc
+        return data, f"ref{ext}"
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise RuntimeError(f"Unsupported image URL scheme: {url[:60]}")
+
+    async with _httpx.AsyncClient(timeout=60, follow_redirects=True) as cli:
+        resp = await cli.get(url)
+        resp.raise_for_status()
+        data = resp.content
+    if len(data) > int(max_mb * 1024 * 1024):
+        raise RuntimeError(f"Image too large (> {max_mb}MB)")
+
+    ctype = (resp.headers.get("content-type") or "image/png").split(";")[0].strip()
+    name = url.rstrip("/#?").rsplit("/", 1)[-1].split("?")[0]
+    if not name.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")):
+        name = f"ref{_IMAGE_EXT_BY_MIME.get(ctype, '.png')}"
+    return data, name
+
 
 class BrowserBackend:
     """Adapter wrapping the single-account BrowserClient (fallback mode)."""
@@ -116,7 +166,13 @@ class BrowserBackend:
 
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
+        ref_image_url: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if ref_image_url:
+            raise RuntimeError(
+                "Browser fallback channel does not support image-to-video; "
+                "configure a free-account pool instead"
+            )
         return await self._client.generate_video(prompt, ratio=ratio)
 
     async def upload_file(self, file_data: bytes, filename: str) -> Dict[str, Any]:
@@ -347,13 +403,21 @@ class FreeAccountBackend:
 
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
+        ref_image_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         entry = self._select_account(for_video=True)
         client = entry.client
         if client is None:
             raise RuntimeError(f"Account {entry.name} not initialized")
         try:
-            result = await client.generate_video(prompt, ratio=ratio)
+            ref_key = None
+            if ref_image_url:
+                data, fname = await download_image_bytes(ref_image_url)
+                att = await client.upload_image(image_bytes=data, filename=fname)
+                ref_key = att.get("uri") or att.get("key") or ""
+            result = await client.generate_video(
+                prompt, ratio=ratio, ref_image_key=ref_key or None,
+            )
         except Exception:
             entry.mark_failure()
             raise
@@ -509,8 +573,9 @@ class VolcanoBackend:
 
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
+        ref_image_url: Optional[str] = None,
     ) -> Dict[str, Any]:
-        result = await self._client.generate_video(prompt, ratio=ratio)
+        result = await self._client.generate_video(prompt, ratio=ratio, ref_image_url=ref_image_url)
         return {
             "videos": [
                 {
@@ -607,26 +672,55 @@ class XiaoyunqueBackend:
         ratio: Optional[str] = None,
         duration: int = 10,
         quality: str = "fast",
+        ref_image_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate a video via the xiaoyquee engine.
 
         Returns the standard dict shape: {"videos": [{"video_url": ...}], ...}
         where ``video_url`` points at the local file-serving endpoint.
+
+        ``ref_image_url`` (http/https/data URI) enables image-to-video; the
+        image is downloaded to a temp file, passed to the engine as
+        ``ref_images=[path]`` and removed afterwards.
         """
+        import os as _os
+        import uuid as _uuid
+
         duration = int(duration) if duration in (5, 10, 15, "5", "10", "15") else 10
         engine_model = self.QUALITY_MAP.get(quality, "fast")
-        out_path = await self._engine.run(
-            prompt=prompt,
-            duration=duration,
-            ratio=self._coerce_ratio(ratio),
-            model=engine_model,
-            ref_images=None,
-            output_dir=self._output_dir,
-            cookie_file=None,
-        )
+
+        ref_images = None
+        tmp_path = None
+        if ref_image_url:
+            data, fname = await download_image_bytes(ref_image_url)
+            _os.makedirs(self._output_dir, exist_ok=True)
+            root, ext = _os.path.splitext(fname)
+            tmp_path = _os.path.join(
+                self._output_dir, f"_ref_{_uuid.uuid4().hex[:8]}{ext or '.png'}"
+            )
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+            ref_images = [tmp_path]
+
+        try:
+            out_path = await self._engine.run(
+                prompt=prompt,
+                duration=duration,
+                ratio=self._coerce_ratio(ratio),
+                model=engine_model,
+                ref_images=ref_images,
+                output_dir=self._output_dir,
+                cookie_file=None,
+            )
+        finally:
+            if tmp_path:
+                try:
+                    _os.remove(tmp_path)
+                except OSError:
+                    pass
+
         if not out_path:
             raise RuntimeError("xiaoyunque generation returned no result")
-        import os as _os
         name = _os.path.basename(out_path)
         return {
             "videos": [

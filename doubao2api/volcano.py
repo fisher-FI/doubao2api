@@ -196,13 +196,21 @@ class VolcanoClient:
         camera_movement: Optional[str] = None,
         ref_image_key: Optional[str] = None,
         timeout: float = 300,
+        ref_image_url: Optional[str] = None,
     ) -> VideoGenerationResult:
         """Generate video via official Ark async task API.
 
         Reference: POST /api/v3/contents/generations/tasks (create),
         GET /api/v3/contents/generations/tasks/{task_id} (poll).
+
+        ``ref_image_url`` (http/https/data URI) enables image-to-video.
         """
-        content = [{"type": "text", "text": prompt}]
+        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if ref_image_url:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": ref_image_url},
+            })
         payload: Dict[str, Any] = {
             "model": self._video_model,
             "content": content,

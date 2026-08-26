@@ -1667,8 +1667,13 @@ curl http://localhost:9090/v1/images/generations \
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `prompt` | string | 是 | 视频描述 |
-| `model` | string | 否 | 固定 `doubao-video` |
+| `model` | string | 否 | `doubao-video`（默认）/ `xyq-video` / `xyq-video-pro` / `volc-video` |
 | `ratio` | string | 否 | `1:1`/`16:9`/`9:16`，也可传 OpenAI 风格 `size` 后自动映射 |
+| `duration` | int | 否 | 5/10/15 秒（仅 `xyq-*` 支持，默认 10） |
+| `image_url` | string | 否 | **图生视频**：参考图 URL，支持 `http(s)://` 或 `data:image/...;base64,...`。豆包池走上传引用、小云雀/火山直接透传；浏览器回退通道不支持 |
+
+> 图生视频示例：`{"model":"xyq-video","prompt":"让画面动起来","image_url":"https://x/cat.png","duration":10}`
+> 限制：图片 ≤20MB；浏览器单账号回退模式不支持 `image_url`（会明确报错）。
 
 **响应**：
 ```json

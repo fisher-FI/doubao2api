@@ -1180,15 +1180,17 @@ def create_app(
             ratio = _size_to_ratio(ratio)
 
         duration = body.get("duration", 10)
+        image_url = (body.get("image_url") or body.get("image") or "").strip() or None
         try:
             if model.startswith("xyq-"):
                 quality = "2.0" if model.endswith("-pro") else "fast"
                 result = await backend.generate_video(
                     prompt=prompt, ratio=ratio, duration=duration, quality=quality,
+                    ref_image_url=image_url,
                 )
             else:
                 result = await backend.generate_video(
-                    prompt=prompt, ratio=ratio,
+                    prompt=prompt, ratio=ratio, ref_image_url=image_url,
                 )
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
@@ -1249,14 +1251,18 @@ def create_app(
             ratio = body.get("ratio") or body.get("size")
             if ratio and "x" in str(ratio):
                 ratio = _size_to_ratio(ratio)
+            image_url = (body.get("image_url") or body.get("image") or "").strip() or None
             if model.startswith("xyq-"):
                 quality = "2.0" if model.endswith("-pro") else "fast"
                 result = await backend.generate_video(
                     prompt=prompt, ratio=ratio,
                     duration=body.get("duration", 10), quality=quality,
+                    ref_image_url=image_url,
                 )
             else:
-                result = await backend.generate_video(prompt=prompt, ratio=ratio)
+                result = await backend.generate_video(
+                    prompt=prompt, ratio=ratio, ref_image_url=image_url,
+                )
 
             videos = result.get("videos", [])
             msg = result.get("message", "")

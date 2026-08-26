@@ -110,3 +110,43 @@ async def test_unsupported_capabilities_raise(tmp_path):
     ):
         with pytest.raises(RuntimeError, match="only supports video"):
             await coro
+
+
+@pytest.mark.asyncio
+async def test_image_to_video_passes_ref_images_and_cleans_up(tmp_path, monkeypatch):
+    import doubao2api.backends as backends_mod
+
+    async def _fake_download(url, max_mb=20.0):
+        return b"fakeimg", "ref.png"
+
+    monkeypatch.setattr(backends_mod, "download_image_bytes", _fake_download)
+
+    captured = {}
+
+    async def _run(**kwargs):
+        captured.update(kwargs)
+        # ref file must exist while engine runs
+        assert kwargs["ref_images"] and kwargs["ref_images"][0].endswith(".png")
+        with open(kwargs["ref_images"][0], "rb") as f:
+            assert f.read() == b"fakeimg"
+        return None
+
+    backend, engine = _make_backend(tmp_path, run_impl=_run)
+    with pytest.raises(RuntimeError, match="no result"):
+        await backend.generate_video("cat", ref_image_url="https://x/a.png")
+
+    assert engine.run.call_args.kwargs["ref_images"] is not None
+    # temp file cleaned up after run
+    import os
+    assert not os.path.exists(captured["ref_images"][0])
+
+
+@pytest.mark.asyncio
+async def test_text_to_video_has_no_ref_images(tmp_path):
+    async def _run(**kwargs):
+        assert kwargs["ref_images"] is None
+        return None
+
+    backend, _ = _make_backend(tmp_path, run_impl=_run)
+    with pytest.raises(RuntimeError, match="no result"):
+        await backend.generate_video("cat")

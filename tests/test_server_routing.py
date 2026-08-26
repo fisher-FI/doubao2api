@@ -306,6 +306,34 @@ def test_xyq_async_video_flow(xyq_app_client):
     assert final["data"][0]["duration"] == 15.0
 
 
+def test_xyq_image_to_video_end_to_end(xyq_app_client, monkeypatch):
+    import doubao2api.backends as backends_mod
+    import doubao2api.xiaoyunque_engine as engine
+
+    async def _fake_download(url, max_mb=20.0):
+        return b"imgbytes", "cat.png"
+
+    monkeypatch.setattr(backends_mod, "download_image_bytes", _fake_download)
+
+    captured = {}
+
+    async def _fake_run(**kwargs):
+        captured.update(kwargs)
+        return None  # will produce failed task, enough to assert wiring
+
+    with patch.object(engine, "run", new=_fake_run):
+        resp = xyq_app_client.post("/v1/video/generations/async", json={
+            "prompt": "make it move", "model": "xyq-video",
+            "image_url": "https://example.com/cat.png",
+        })
+        assert resp.status_code == 200
+        final = _poll_task(xyq_app_client, resp.json()["task_id"])
+
+    assert final["status"] == "failed"  # engine mocked to fail after capture
+    refs = captured.get("ref_images")
+    assert refs and len(refs) == 1 and refs[0].endswith(".png")
+
+
 def test_video_task_delete(app_client):
     resp = app_client.delete("/v1/video/tasks/videotask-nope")
     assert resp.status_code == 404
