@@ -38,6 +38,25 @@ class TestAccountEntry:
         entry.increment_quota()
         assert entry.daily_quota_used == 2
 
+    def test_increment_quota_with_points(self):
+        entry = AccountEntry(name="test", session_file="test.json")
+        entry.increment_quota(2)
+        entry.increment_quota(1)
+        assert entry.daily_quota_used == 3
+
+    def test_quota_points_for_duration(self):
+        # Official rule: 10s = 2 points, 5s = 1 point
+        assert AccountEntry.quota_points_for_duration(5.0) == 1
+        assert AccountEntry.quota_points_for_duration(10.0) == 2
+        assert AccountEntry.quota_points_for_duration(8.0) == 2   # rounds to 2
+        assert AccountEntry.quota_points_for_duration(3.0) == 1   # minimum 1
+        assert AccountEntry.quota_points_for_duration(0) == 1     # unknown -> 1
+
+    def test_to_dict_has_quota_max(self):
+        entry = AccountEntry(name="test", session_file="test.json")
+        d = entry.to_dict()
+        assert d["daily_quota_max"] == 10
+
     def test_is_healthy(self):
         entry = AccountEntry(name="test", session_file="test.json", enabled=True)
         assert entry.is_healthy() is True

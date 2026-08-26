@@ -358,7 +358,11 @@ class FreeAccountBackend:
             entry.mark_failure()
             raise
         entry.mark_success()
-        entry.increment_quota()
+        # Official quota accounting: 10s video = 2 points, 5s = 1 point
+        total_points = sum(
+            AccountEntry.quota_points_for_duration(v.duration) for v in result.videos
+        )
+        entry.increment_quota(total_points)
         return {
             "videos": [
                 {

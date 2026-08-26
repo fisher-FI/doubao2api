@@ -80,12 +80,22 @@ class AccountEntry:
     def is_healthy(self) -> bool:
         return self.enabled and not self.needs_captcha and self.consecutive_failures < 5
 
-    def increment_quota(self):
+    def increment_quota(self, points: int = 1):
         today = date.today().isoformat()
         if self.quota_date != today:
             self.daily_quota_used = 0
             self.quota_date = today
-        self.daily_quota_used += 1
+        self.daily_quota_used += points
+
+    @staticmethod
+    def quota_points_for_duration(duration_seconds: float) -> int:
+        """Official Doubao video quota points: 10s video = 2 points, 5s = 1 point.
+
+        Roughly 1 point per 5 seconds (rounded), minimum 1 point per video.
+        """
+        if duration_seconds <= 0:
+            return 1
+        return max(1, round(duration_seconds / 5.0))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -102,6 +112,7 @@ class AccountEntry:
             "needs_captcha": self.needs_captcha,
             "is_healthy": self.is_healthy(),
             "daily_quota_used": self.daily_quota_used,
+            "daily_quota_max": 10,
             "quota_date": self.quota_date,
         }
 

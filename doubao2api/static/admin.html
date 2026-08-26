@@ -248,7 +248,9 @@ class="px-2.5 py-1 bg-brand-900/40 text-brand-300 text-xs rounded-full border bo
 <td class="py-2 px-3 text-red-400 font-mono">{{acct.failure_count}}</td>
 <td class="py-2 px-3 font-mono">{{acct.consecutive_failures}}</td>
 <td class="py-2 px-3">{{acct.needs_captcha?'⚠️ 需验证码':'—'}}</td>
-<td class="py-2 px-3 font-mono">{{acct.daily_quota_used}}</td>
+<td class="py-2 px-3">
+<span class="font-mono" :class="acct.daily_quota_used>=acct.daily_quota_max?'text-red-400':(acct.daily_quota_used>=6?'text-amber-400':'text-green-400')">{{acct.daily_quota_used}}/{{acct.daily_quota_max}}</span>
+</td>
 <td class="py-2 px-3 text-slate-400 font-mono text-xs">{{fmtTime(acct.last_used_at)}}</td>
 <td class="py-2 px-3 whitespace-nowrap">
 <button @click="toggleAccount(acct.name)" class="btn-sm">{{acct.enabled?'停用':'启用'}}</button>

@@ -125,7 +125,21 @@ async def test_free_account_backend_generate_video_marks_quota():
 
     result = await backend.generate_video("cat", "16:9")
     assert result["videos"][0]["video_url"] == "https://cdn/v.mp4"
-    assert entry.daily_quota_used == 1
+    assert entry.daily_quota_used == 1  # 5s video = 1 point
+
+
+@pytest.mark.asyncio
+async def test_free_account_backend_generate_video_10s_costs_2_points():
+    entry = AccountEntry(name="test", session_file="test.json", client=MagicMock())
+    entry.client.generate_video = AsyncMock(return_value=VideoGenerationResult(
+        videos=[GeneratedVideo(video_url="https://cdn/long.mp4", duration=10.0)],
+        prompt="cat",
+    ))
+    pool = _make_pool_with_entry(entry)
+    backend = FreeAccountBackend(pool)
+
+    await backend.generate_video("cat")
+    assert entry.daily_quota_used == 2  # official rule: 10s = 2 points
 
 
 @pytest.mark.asyncio
