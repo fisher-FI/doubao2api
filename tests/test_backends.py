@@ -185,6 +185,51 @@ async def test_browser_backend_rejects_ref_image():
 
 
 @pytest.mark.asyncio
+async def test_free_backend_camera_movement_passthrough():
+    entry = AccountEntry(name="test", session_file="t.json", client=MagicMock())
+    entry.client.generate_video = AsyncMock(return_value=VideoGenerationResult(
+        videos=[GeneratedVideo(video_url="u", duration=5.0)], prompt="p"))
+    pool = _make_pool_with_entry(entry)
+    backend = FreeAccountBackend(pool)
+
+    await backend.generate_video("cat", camera_movement="推镜头")
+    kwargs = entry.client.generate_video.await_args.kwargs
+    assert kwargs["camera_movement"] == "推镜头"
+
+
+@pytest.mark.asyncio
+async def test_free_backend_rejects_last_frame():
+    entry = AccountEntry(name="test", session_file="t.json", client=MagicMock())
+    pool = _make_pool_with_entry(entry)
+    backend = FreeAccountBackend(pool)
+
+    with pytest.raises(RuntimeError, match="last-frame"):
+        await backend.generate_video("cat", last_frame_url="https://x/last.png")
+    assert entry.client.generate_video.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_free_backend_first_frame_used_as_reference(tmp_path, monkeypatch):
+    import doubao2api.backends as backends_mod
+
+    async def _fake_download(url, max_mb=20.0):
+        return b"img", "first.jpg"
+
+    monkeypatch.setattr(backends_mod, "download_image_bytes", _fake_download)
+
+    entry = AccountEntry(name="test", session_file="t.json", client=MagicMock())
+    entry.client.upload_image = AsyncMock(return_value={"uri": "tos-first"})
+    entry.client.generate_video = AsyncMock(return_value=VideoGenerationResult(
+        videos=[GeneratedVideo(video_url="u", duration=5.0)], prompt="p"))
+    pool = _make_pool_with_entry(entry)
+    backend = FreeAccountBackend(pool)
+
+    await backend.generate_video("cat", first_frame_url="https://x/first.jpg")
+    kwargs = entry.client.generate_video.await_args.kwargs
+    assert kwargs["ref_image_key"] == "tos-first"
+
+
+@pytest.mark.asyncio
 async def test_volcano_backend_generate_video_dict():
     mock_client = MagicMock()
     mock_client.generate_video = AsyncMock(return_value=VideoGenerationResult(

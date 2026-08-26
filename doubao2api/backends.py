@@ -167,11 +167,14 @@ class BrowserBackend:
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
         ref_image_url: Optional[str] = None,
+        first_frame_url: Optional[str] = None,
+        last_frame_url: Optional[str] = None,
+        camera_movement: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if ref_image_url:
+        if any((ref_image_url, first_frame_url, last_frame_url, camera_movement)):
             raise RuntimeError(
-                "Browser fallback channel does not support image-to-video; "
-                "configure a free-account pool instead"
+                "Browser fallback channel does not support image-to-video / "
+                "camera control; configure a free-account pool instead"
             )
         return await self._client.generate_video(prompt, ratio=ratio)
 
@@ -404,19 +407,29 @@ class FreeAccountBackend:
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
         ref_image_url: Optional[str] = None,
+        first_frame_url: Optional[str] = None,
+        last_frame_url: Optional[str] = None,
+        camera_movement: Optional[str] = None,
     ) -> Dict[str, Any]:
         entry = self._select_account(for_video=True)
         client = entry.client
         if client is None:
             raise RuntimeError(f"Account {entry.name} not initialized")
+        if last_frame_url:
+            raise RuntimeError(
+                "Doubao channel does not support last-frame control "
+                "(use xyq-video / volc-video for first-&-last-frame)"
+            )
         try:
             ref_key = None
-            if ref_image_url:
-                data, fname = await download_image_bytes(ref_image_url)
+            ref_source = ref_image_url or first_frame_url
+            if ref_source:
+                data, fname = await download_image_bytes(ref_source)
                 att = await client.upload_image(image_bytes=data, filename=fname)
                 ref_key = att.get("uri") or att.get("key") or ""
             result = await client.generate_video(
-                prompt, ratio=ratio, ref_image_key=ref_key or None,
+                prompt, ratio=ratio, camera_movement=camera_movement or None,
+                ref_image_key=ref_key or None,
             )
         except Exception:
             entry.mark_failure()
@@ -574,8 +587,14 @@ class VolcanoBackend:
     async def generate_video(
         self, prompt: str, ratio: Optional[str] = None,
         ref_image_url: Optional[str] = None,
+        first_frame_url: Optional[str] = None,
+        last_frame_url: Optional[str] = None,
+        camera_movement: Optional[str] = None,  # not supported by Ark video API; ignored
     ) -> Dict[str, Any]:
-        result = await self._client.generate_video(prompt, ratio=ratio, ref_image_url=ref_image_url)
+        result = await self._client.generate_video(
+            prompt, ratio=ratio, ref_image_url=ref_image_url,
+            first_frame_url=first_frame_url, last_frame_url=last_frame_url,
+        )
         return {
             "videos": [
                 {
@@ -673,15 +692,19 @@ class XiaoyunqueBackend:
         duration: int = 10,
         quality: str = "fast",
         ref_image_url: Optional[str] = None,
+        first_frame_url: Optional[str] = None,
+        last_frame_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate a video via the xiaoyquee engine.
 
         Returns the standard dict shape: {"videos": [{"video_url": ...}], ...}
         where ``video_url`` points at the local file-serving endpoint.
 
-        ``ref_image_url`` (http/https/data URI) enables image-to-video; the
-        image is downloaded to a temp file, passed to the engine as
-        ``ref_images=[path]`` and removed afterwards.
+        Image-to-video: reference images are downloaded to temp files and
+        passed to the engine as ordered ``ref_images`` — 1 image = single
+        reference/first frame, 2 images = first & last frame (the JianYing
+        web API interprets them by order; there is no explicit role field).
+        Temp files are removed afterwards.
         """
         import os as _os
         import uuid as _uuid
@@ -689,33 +712,35 @@ class XiaoyunqueBackend:
         duration = int(duration) if duration in (5, 10, 15, "5", "10", "15") else 10
         engine_model = self.QUALITY_MAP.get(quality, "fast")
 
-        ref_images = None
-        tmp_path = None
-        if ref_image_url:
-            data, fname = await download_image_bytes(ref_image_url)
-            _os.makedirs(self._output_dir, exist_ok=True)
-            root, ext = _os.path.splitext(fname)
-            tmp_path = _os.path.join(
-                self._output_dir, f"_ref_{_uuid.uuid4().hex[:8]}{ext or '.png'}"
-            )
-            with open(tmp_path, "wb") as f:
-                f.write(data)
-            ref_images = [tmp_path]
+        effective_first = first_frame_url or ref_image_url
+        frame_urls = [u for u in (effective_first, last_frame_url) if u][:2]
 
+        tmp_paths = []
         try:
+            for u in frame_urls:
+                data, fname = await download_image_bytes(u)
+                _os.makedirs(self._output_dir, exist_ok=True)
+                root, ext = _os.path.splitext(fname)
+                tmp_path = _os.path.join(
+                    self._output_dir, f"_ref_{_uuid.uuid4().hex[:8]}{ext or '.png'}"
+                )
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                tmp_paths.append(tmp_path)
+
             out_path = await self._engine.run(
                 prompt=prompt,
                 duration=duration,
                 ratio=self._coerce_ratio(ratio),
                 model=engine_model,
-                ref_images=ref_images,
+                ref_images=tmp_paths or None,
                 output_dir=self._output_dir,
                 cookie_file=None,
             )
         finally:
-            if tmp_path:
+            for p in tmp_paths:
                 try:
-                    _os.remove(tmp_path)
+                    _os.remove(p)
                 except OSError:
                     pass
 

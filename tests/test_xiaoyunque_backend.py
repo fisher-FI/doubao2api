@@ -150,3 +150,28 @@ async def test_text_to_video_has_no_ref_images(tmp_path):
     backend, _ = _make_backend(tmp_path, run_impl=_run)
     with pytest.raises(RuntimeError, match="no result"):
         await backend.generate_video("cat")
+
+
+@pytest.mark.asyncio
+async def test_first_and_last_frame_pass_two_ordered_images(tmp_path, monkeypatch):
+    import doubao2api.backends as backends_mod
+    import os
+
+    async def _fake_download(url, max_mb=20.0):
+        return b"frame", "f.png"
+
+    monkeypatch.setattr(backends_mod, "download_image_bytes", _fake_download)
+
+    async def _run(**kwargs):
+        refs = kwargs["ref_images"]
+        assert refs and len(refs) == 2  # first + last in order
+        return None
+
+    backend, _ = _make_backend(tmp_path, run_impl=_run)
+    with pytest.raises(RuntimeError, match="no result"):
+        await backend.generate_video(
+            "cat", first_frame_url="https://x/first.png",
+            last_frame_url="https://x/last.png",
+        )
+    # both temp files cleaned
+    assert not any(f.startswith("_ref_") for f in os.listdir(str(tmp_path / "out")))

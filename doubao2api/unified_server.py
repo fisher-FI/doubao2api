@@ -1168,8 +1168,8 @@ def create_app(
         _check_auth(request)
         await bucket.acquire()
 
-        body = await request.json()
-        prompt = body.get("prompt", "")
+        body = await _parse_video_request(request)
+        prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             raise HTTPException(status_code=400, detail="Missing prompt")
         model = body.get("model", "doubao-video")
@@ -1179,19 +1179,8 @@ def create_app(
         if ratio and "x" in str(ratio):
             ratio = _size_to_ratio(ratio)
 
-        duration = body.get("duration", 10)
-        image_url = (body.get("image_url") or body.get("image") or "").strip() or None
         try:
-            if model.startswith("xyq-"):
-                quality = "2.0" if model.endswith("-pro") else "fast"
-                result = await backend.generate_video(
-                    prompt=prompt, ratio=ratio, duration=duration, quality=quality,
-                    ref_image_url=image_url,
-                )
-            else:
-                result = await backend.generate_video(
-                    prompt=prompt, ratio=ratio, ref_image_url=image_url,
-                )
+            result = await _invoke_generate_video(backend, model, body, ratio)
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1206,6 +1195,84 @@ def create_app(
             "created": int(time.time()),
             "data": videos,
         })
+
+    # ── Video request parsing (JSON + multipart) ──
+    # Accepts application/json with prompt/model/ratio/duration/camera_movement/
+    # image_url|image/first_frame_url/last_frame_url, OR multipart/form-data with
+    # the same text fields plus direct image file uploads in fields
+    # "image"/"images"/"file"/"files". Uploaded files are converted to data URIs
+    # so every channel consumes the same uniform fields.
+
+    _VIDEO_TEXT_FIELDS = (
+        "prompt", "model", "ratio", "size", "duration",
+        "camera_movement", "image_url", "first_frame_url", "last_frame_url",
+    )
+
+    async def _parse_video_request(request: Request) -> Dict[str, Any]:
+        import base64 as _b64
+        import mimetypes as _mimetypes
+
+        ct = (request.headers.get("content-type") or "").lower()
+        body: Dict[str, Any] = {}
+        uploads: List[str] = []
+
+        if "multipart/form-data" in ct:
+            form = await request.form()
+            for key in _VIDEO_TEXT_FIELDS:
+                v = form.get(key)
+                if v not in (None, ""):
+                    body[key] = str(v)
+            for field in ("image", "images", "file", "files"):
+                for f in form.getlist(field):
+                    data = await f.read()
+                    if not data:
+                        continue
+                    if len(data) > 15 * 1024 * 1024:
+                        raise HTTPException(status_code=400, detail="Image file too large (>15MB)")
+                    name = getattr(f, "filename", None) or "ref.png"
+                    mime = _mimetypes.guess_type(name)[0] or "image/png"
+                    uploads.append(f"data:{mime};base64,{_b64.b64encode(data).decode()}")
+        else:
+            raw = await request.json()
+            if isinstance(raw, dict):
+                body.update(raw)
+
+        # Normalize single-reference aliases into canonical keys
+        if not body.get("image_url"):
+            alias = str(body.get("image") or "").strip()
+            if alias:
+                body["image_url"] = alias
+
+        if uploads:
+            if len(uploads) == 1 and not body.get("first_frame_url"):
+                body.setdefault("image_url", uploads[0])
+            else:
+                body.setdefault("first_frame_url", uploads[0])
+                if len(uploads) > 1:
+                    body.setdefault("last_frame_url", uploads[1])
+        return body
+
+    async def _invoke_generate_video(
+        backend: Any, model: str, body: Dict[str, Any], ratio: Optional[str],
+    ) -> Dict[str, Any]:
+        """Dispatch a parsed video request to the right backend/channel."""
+        prompt = str(body.get("prompt", ""))
+        ref = (body.get("image_url") or "").strip() or None
+        first = (body.get("first_frame_url") or "").strip() or None
+        last = (body.get("last_frame_url") or "").strip() or None
+        cam = (body.get("camera_movement") or "").strip() or None
+        if model.startswith("xyq-"):
+            quality = "2.0" if model.endswith("-pro") else "fast"
+            return await backend.generate_video(
+                prompt=prompt, ratio=ratio,
+                duration=body.get("duration", 10), quality=quality,
+                ref_image_url=ref, first_frame_url=first, last_frame_url=last,
+            )
+        return await backend.generate_video(
+            prompt=prompt, ratio=ratio,
+            ref_image_url=ref, first_frame_url=first, last_frame_url=last,
+            camera_movement=cam,
+        )
 
     # ── Async video task API ──
     # POST /v1/video/generations/async          -> submit, returns task_id at once
@@ -1251,18 +1318,7 @@ def create_app(
             ratio = body.get("ratio") or body.get("size")
             if ratio and "x" in str(ratio):
                 ratio = _size_to_ratio(ratio)
-            image_url = (body.get("image_url") or body.get("image") or "").strip() or None
-            if model.startswith("xyq-"):
-                quality = "2.0" if model.endswith("-pro") else "fast"
-                result = await backend.generate_video(
-                    prompt=prompt, ratio=ratio,
-                    duration=body.get("duration", 10), quality=quality,
-                    ref_image_url=image_url,
-                )
-            else:
-                result = await backend.generate_video(
-                    prompt=prompt, ratio=ratio, ref_image_url=image_url,
-                )
+            result = await _invoke_generate_video(backend, model, body, ratio)
 
             videos = result.get("videos", [])
             msg = result.get("message", "")
@@ -1288,7 +1344,7 @@ def create_app(
     async def video_generations_async(request: Request):
         """Submit a video generation task; returns task_id immediately."""
         _check_auth(request)
-        body = await request.json()
+        body = await _parse_video_request(request)
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             raise HTTPException(status_code=400, detail="Missing prompt")

@@ -1669,11 +1669,31 @@ curl http://localhost:9090/v1/images/generations \
 | `prompt` | string | 是 | 视频描述 |
 | `model` | string | 否 | `doubao-video`（默认）/ `xyq-video` / `xyq-video-pro` / `volc-video` |
 | `ratio` | string | 否 | `1:1`/`16:9`/`9:16`，也可传 OpenAI 风格 `size` 后自动映射 |
-| `duration` | int | 否 | 5/10/15 秒（仅 `xyq-*` 支持，默认 10） |
-| `image_url` | string | 否 | **图生视频**：参考图 URL，支持 `http(s)://` 或 `data:image/...;base64,...`。豆包池走上传引用、小云雀/火山直接透传；浏览器回退通道不支持 |
+| `duration` | int | 否 | 5/10/15 秒（仅 `xyq-*`，默认 10） |
+| `image_url` / `image` | string | 否 | **图生视频**：单张参考图（http/https/data URI）。豆包=参考图；火山=首帧 |
+| `first_frame_url` | string | 否 | **首帧**控制（优先于 `image_url`）；与 `last_frame_url` 组合实现首尾帧 |
+| `last_frame_url` | string | 否 | **尾帧**控制。仅 `xyq-*` 与 `volc-*` 支持；豆包通道会明确报错 |
+| `camera_movement` | string | 否 | 运镜描述（如「推镜头」「环绕」），仅 `doubao-video` 底层透传 |
 
-> 图生视频示例：`{"model":"xyq-video","prompt":"让画面动起来","image_url":"https://x/cat.png","duration":10}`
-> 限制：图片 ≤20MB；浏览器单账号回退模式不支持 `image_url`（会明确报错）。
+**通道能力矩阵**：
+
+| 能力 | doubao 池 | xyq 小云雀 | volc 官方 |
+|---|---|---|---|
+| 文生视频 | ✅ | ✅ | ✅ |
+| 单图生视频（首帧/参考图） | ✅ 上传引用 | ✅ | ✅ URL 直传 |
+| 首尾帧控制 | ❌ 明确报错 | ✅ 按序传递 | ✅ 原生双 image_url |
+| 运镜参数 | ✅ | ❌ 忽略 | ❌ 忽略 |
+
+**multipart 直传**：`POST /v1/video/generations`（同步/异步均可）支持 `multipart/form-data`——文本字段同上，图片文件放 `image`/`images`/`file`/`files` 字段（≤15MB/张），1 张=参考图、2 张=首+尾帧：
+
+```bash
+curl -X POST http://localhost:9090/v1/video/generations/async \
+  -F "model=xyq-video" -F "prompt=让两张图之间平滑过渡" \
+  -F "images=@first.jpg" -F "images=@last.jpg"
+```
+
+> 图生视频示例（JSON）：`{"model":"xyq-video","prompt":"让画面动起来","image_url":"https://x/cat.png","duration":10}`
+> 浏览器单账号回退通道不支持以上任何图像/运镜参数（会明确报错）。
 
 **响应**：
 ```json

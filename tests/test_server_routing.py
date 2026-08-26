@@ -337,3 +337,86 @@ def test_xyq_image_to_video_end_to_end(xyq_app_client, monkeypatch):
 def test_video_task_delete(app_client):
     resp = app_client.delete("/v1/video/tasks/videotask-nope")
     assert resp.status_code == 404
+
+
+# ── Multipart upload / first-last-frame API ──
+
+
+def test_multipart_image_to_video_doubao(app_client):
+    from doubao2api import DoubaoChatClient
+
+    async def _fake_upload(*args, **kwargs):
+        return {"uri": "tos-multipart-1", "cdn_url": "https://cdn/x.png"}
+
+    async def _fake_video(*args, **kwargs):
+        assert kwargs.get("ref_image_key") == "tos-multipart-1"
+        return VideoGenerationResult(
+            videos=[GeneratedVideo(video_url="https://cdn/mp.mp4", duration=5.0)],
+            prompt=kwargs.get("prompt", ""),
+        )
+
+    with patch.object(DoubaoChatClient, "upload_image", new=_fake_upload), \
+         patch.object(DoubaoChatClient, "generate_video", new=_fake_video):
+        resp = app_client.post(
+            "/v1/video/generations",
+            data={"prompt": "make it move"},
+            files={"file": ("cat.png", b"fakepng", "image/png")},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"][0]["video_url"] == "https://cdn/mp.mp4"
+
+
+def test_multipart_two_files_map_to_first_last(xyq_app_client):
+    import doubao2api.xiaoyunque_engine as engine
+
+    captured = {}
+
+    async def _run(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    with patch.object(engine, "run", new=_run):
+        resp = xyq_app_client.post(
+            "/v1/video/generations/async",
+            data={"prompt": "morph", "model": "xyq-video"},
+            files=[
+                ("images", ("first.png", b"aaa", "image/png")),
+                ("images", ("last.png", b"bbb", "image/png")),
+            ],
+        )
+    assert resp.status_code == 200, resp.text
+    final = _poll_task(xyq_app_client, resp.json()["task_id"])
+    assert final["status"] == "failed"  # engine mocked to fail after capture
+    refs = captured.get("ref_images")
+    assert refs and len(refs) == 2
+
+
+def test_camera_movement_reaches_free_backend(app_client):
+    from doubao2api import DoubaoChatClient
+
+    seen = {}
+
+    async def _fake_video(*args, **kwargs):
+        seen.update(kwargs)
+        return VideoGenerationResult(
+            videos=[GeneratedVideo(video_url="https://cdn/cam.mp4", duration=5.0)],
+            prompt="p",
+        )
+
+    with patch.object(DoubaoChatClient, "generate_video", new=_fake_video):
+        resp = app_client.post("/v1/video/generations", json={
+            "prompt": "city flythrough", "camera_movement": "推镜头",
+        })
+    assert resp.status_code == 200
+    assert seen.get("camera_movement") == "推镜头"
+
+
+def test_last_frame_on_doubao_returns_502(app_client):
+    resp = app_client.post("/v1/video/generations", json={
+        "prompt": "x",
+        "first_frame_url": "https://x/a.png",
+        "last_frame_url": "https://x/b.png",
+    })
+    assert resp.status_code == 502
+    assert "last-frame" in resp.json()["error"]["message"] or \
+           "last-frame" in resp.text
