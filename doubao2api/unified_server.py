@@ -25,11 +25,11 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .account_pool import AccountPool
-from .backends import FreeAccountBackend, VolcanoBackend
+from .backends import FreeAccountBackend, VolcanoBackend, XiaoyunqueBackend
 from .browser_client import BrowserClient
 from .qianwen_client import QianwenClient, QIANWEN_MODELS
 from .volcano import VolcanoClient
@@ -233,6 +233,7 @@ def create_app(
     _qianwen: Dict[str, Any] = {}  # holds QianwenClient instance
     _pool: Dict[str, Any] = {}     # holds AccountPool + FreeAccountBackend
     _volcano: Dict[str, Any] = {}  # holds VolcanoClient + VolcanoBackend
+    _xyq: Dict[str, Any] = {}      # holds XiaoyunqueBackend (剪映小云雀通道)
 
     async def _browser_watchdog():
         """Background task: check browser health every 30s, auto-restart on crash."""
@@ -318,6 +319,24 @@ def create_app(
             _volcano["volcano_backend"] = VolcanoBackend(volc)
             log.info("Volcano Engine configured")
 
+        # ── 小云雀 (剪映 Seedance 2.0) channel ──
+        xyq_cookies_dir = os.environ.get("XYQ_COOKIES_DIR", "./xyq_cookies")
+        os.makedirs(xyq_cookies_dir, exist_ok=True)
+        try:
+            _xyq["backend"] = XiaoyunqueBackend(
+                cookies_dir=xyq_cookies_dir,
+                output_dir=os.environ.get("XYQ_OUTPUT_DIR", "./xyq_downloads"),
+                headless=os.environ.get("XYQ_HEADLESS", "true").lower() == "true",
+            )
+            n_cookies = len(_xyq["backend"].cookie_names())
+            if n_cookies:
+                log.info("Xiaoyunque channel ready with %d cookies", n_cookies)
+            else:
+                log.info("Xiaoyunque channel initialized (no cookies yet; "
+                         "upload via /admin/api/xyq/cookies)")
+        except Exception as e:
+            log.warning("Xiaoyunque backend init failed: %s", e)
+
         yield
 
         # Shutdown
@@ -335,6 +354,14 @@ def create_app(
         if volc:
             try:
                 await volc.close()
+            except Exception:
+                pass
+        xyq_engine = _xyq.pop("backend", None)
+        if xyq_engine is not None:
+            try:
+                bs = getattr(xyq_engine._engine, "browser_session", None)
+                if bs and bs.browser:
+                    await bs.browser.close()
             except Exception:
                 pass
 
@@ -409,6 +436,16 @@ def create_app(
 
     def _get_backend(model: str = "doubao") -> Any:
         """Return the appropriate backend for the given model name."""
+        if isinstance(model, str) and model.startswith("xyq-"):
+            xyq = _xyq.get("backend")
+            if xyq is None:
+                raise HTTPException(status_code=503, detail="Xiaoyunque channel not initialized")
+            if not xyq.is_ready:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No xiaoyunque cookies. Upload via /admin/api/xyq/cookies",
+                )
+            return xyq
         if isinstance(model, str) and model.startswith("volc-"):
             volc_backend = _volcano.get("volcano_backend")
             if volc_backend is None:
@@ -555,12 +592,15 @@ def create_app(
     async def health():
         pool = _pool.get("pool")
         volc_backend = _volcano.get("volcano_backend")
+        xyq = _xyq.get("backend")
         result = {
             "status": "ok",
             "pool_ready": bool(pool) and pool.healthy_count > 0,
             "pool_total": pool.total_count if pool else 0,
             "pool_healthy": pool.healthy_count if pool else 0,
             "volcano_configured": bool(volc_backend) and volc_backend.is_ready,
+            "xyq_ready": bool(xyq) and xyq.is_ready,
+            "xyq_cookies": len(xyq.cookie_names()) if xyq else 0,
         }
         # Legacy browser fields (backward compat)
         client = _browser.get("client")
@@ -571,7 +611,7 @@ def create_app(
             result["consecutive_failures"] = client.consecutive_failures
             result["needs_captcha"] = client.needs_captcha
             result["last_error_code"] = client.last_error_code
-        if not (result["pool_ready"] or ready or result["volcano_configured"]):
+        if not (result["pool_ready"] or ready or result["volcano_configured"] or result["xyq_ready"]):
             result["status"] = "not_ready"
         result["expert_degraded"] = _expert_tracker.is_degraded
         # Qianwen status
@@ -600,6 +640,13 @@ def create_app(
                 {"id": "volc-chat", "object": "model", "owned_by": "volcano", "created": 0},
                 {"id": "volc-image", "object": "model", "owned_by": "volcano", "created": 0},
                 {"id": "volc-video", "object": "model", "owned_by": "volcano", "created": 0},
+            ]
+        # Add Xiaoyunque video models if cookies present
+        xyq = _xyq.get("backend")
+        if xyq and xyq.is_ready:
+            models += [
+                {"id": "xyq-video", "object": "model", "owned_by": "xiaoyunque", "created": 0},
+                {"id": "xyq-video-pro", "object": "model", "owned_by": "xiaoyunque", "created": 0},
             ]
         return {"object": "list", "data": models}
 
@@ -1132,10 +1179,17 @@ def create_app(
         if ratio and "x" in str(ratio):
             ratio = _size_to_ratio(ratio)
 
+        duration = body.get("duration", 10)
         try:
-            result = await backend.generate_video(
-                prompt=prompt, ratio=ratio,
-            )
+            if model.startswith("xyq-"):
+                quality = "2.0" if model.endswith("-pro") else "fast"
+                result = await backend.generate_video(
+                    prompt=prompt, ratio=ratio, duration=duration, quality=quality,
+                )
+            else:
+                result = await backend.generate_video(
+                    prompt=prompt, ratio=ratio,
+                )
         except RuntimeError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
 
@@ -1150,6 +1204,20 @@ def create_app(
             "created": int(time.time()),
             "data": videos,
         })
+
+    @app.get("/xyq-files/{name}")
+    async def xyq_file(name: str, request: Request):
+        """Serve videos generated by the xiaoyunque channel from its output dir."""
+        _check_auth(request)
+        backend = _xyq.get("backend")
+        base = os.path.abspath(
+            getattr(backend, "_output_dir", None)
+            or os.environ.get("XYQ_OUTPUT_DIR", "./xyq_downloads")
+        )
+        target = os.path.abspath(os.path.join(base, name))
+        if not target.startswith(base) or not os.path.isfile(target):
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(target, media_type="video/mp4", filename=name)
 
     @app.post("/v1/files")
     async def upload_file(request: Request):
@@ -1893,6 +1961,7 @@ def create_app(
         _check_auth(request)
         pool = _pool.get("pool")
         volc_backend = _volcano.get("volcano_backend")
+        xyq = _xyq.get("backend")
         return JSONResponse({
             "free_accounts": {
                 "configured": bool(pool) and pool.total_count > 0,
@@ -1903,8 +1972,73 @@ def create_app(
                 "configured": bool(volc_backend) and volc_backend.is_ready,
                 "api_key_set": bool(os.environ.get("VOLC_API_KEY", "")),
             },
+            "xiaoyunque": {
+                "configured": bool(xyq) and xyq.is_ready,
+                "cookies": xyq.cookie_names() if xyq else [],
+            },
             "default_channel": os.environ.get("DOUBAO_VIDEO_CHANNEL", "free"),
         })
+
+    # ── Xiaoyunque (剪映小云雀) channel management ──
+
+    @app.get("/admin/api/xyq")
+    async def admin_xyq_status(request: Request):
+        _check_auth(request)
+        xyq = _xyq.get("backend")
+        if not xyq:
+            return JSONResponse({"configured": False, "cookies": [], "headless": True})
+        return JSONResponse({
+            "configured": xyq.is_ready,
+            "cookies": xyq.cookie_names(),
+            "headless": bool(getattr(xyq._engine.config, "headless", True)),
+            "output_dir": xyq._output_dir,
+            "models": {
+                "xyq-video": "Seedance 2.0 Fast (5 积分/秒)",
+                "xyq-video-pro": "Seedance 2.0 (8 积分/秒)",
+            },
+        })
+
+    @app.post("/admin/api/xyq/cookies")
+    async def admin_xyq_upload_cookie(request: Request):
+        _check_auth(request)
+        xyq = _xyq.get("backend")
+        if not xyq:
+            raise HTTPException(status_code=503, detail="Xiaoyunque channel not initialized")
+        form = await request.form()
+        upload = form.get("file")
+        if not upload:
+            raise HTTPException(status_code=400, detail="Missing file field (cookie JSON)")
+        content = await upload.read()
+        name = upload.filename or "cookie.json"
+        if not name.endswith(".json"):
+            name += ".json"
+        name = os.path.basename(name)
+        dest = os.path.join(xyq._engine.config.cookies_dir, name)
+        with open(dest, "wb") as f:
+            f.write(content)
+        # Validate JSON structure loosely
+        import json as _json
+        try:
+            _json.loads(content.decode("utf-8"))
+        except Exception:
+            os.remove(dest)
+            raise HTTPException(status_code=400, detail="Invalid JSON cookie file")
+        return JSONResponse({"status": "ok", "name": name, "cookies": xyq.cookie_names()})
+
+    @app.delete("/admin/api/xyq/cookies/{name}")
+    async def admin_xyq_delete_cookie(name: str, request: Request):
+        _check_auth(request)
+        xyq = _xyq.get("backend")
+        if not xyq:
+            raise HTTPException(status_code=503, detail="Xiaoyunque channel not initialized")
+        safe = os.path.basename(name)
+        if not safe.endswith(".json"):
+            safe += ".json"
+        path = os.path.join(xyq._engine.config.cookies_dir, safe)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail=f"Cookie '{name}' not found")
+        os.remove(path)
+        return JSONResponse({"status": "ok", "cookies": xyq.cookie_names()})
 
     @app.get("/admin/api/cookies")
     async def admin_cookies(request: Request):

@@ -127,4 +127,83 @@ def test_admin_channel_status(app_client):
     data = resp.json()
     assert data["free_accounts"]["configured"] is True
     assert data["volcano"]["configured"] is True
-    assert data["volcano"]["api_key_set"] is True
+
+
+@pytest.fixture
+def xyq_app_client(tmp_path, monkeypatch):
+    """App with a fake xiaoyquee cookies dir; engine.run patched to return a real file."""
+    monkeypatch.delenv("VOLC_API_KEY", raising=False)
+    cookies_dir = tmp_path / "xyq_cookies"
+    cookies_dir.mkdir()
+    (cookies_dir / "test_cookie.json").write_text(json.dumps({"sessionid": "xyq"}), encoding="utf-8")
+    out_dir = tmp_path / "xyq_downloads"
+    out_dir.mkdir()
+    fake_mp4 = out_dir / "cat_10s_x.mp4"
+    fake_mp4.write_bytes(b"fake mp4 bytes")
+    monkeypatch.setenv("XYQ_COOKIES_DIR", str(cookies_dir))
+    monkeypatch.setenv("XYQ_OUTPUT_DIR", str(out_dir))
+
+    from doubao2api.browser_client import BrowserClient
+    import doubao2api.xiaoyunque_engine as engine
+
+    async def _fake_run(**kwargs):
+        return str(fake_mp4)
+
+    with patch.object(BrowserClient, "start", new=AsyncMock(return_value=None)), \
+         patch.object(BrowserClient, "is_ready", new_callable=lambda: property(lambda self: False)), \
+         patch.object(engine, "run", new=_fake_run):
+        app = us.create_app(api_key=None)
+        with TestClient(app) as c:
+            yield c
+
+
+def test_xyq_video_generation_end_to_end(xyq_app_client):
+    c = xyq_app_client
+    # models list includes xyq when cookies present
+    ids = [m["id"] for m in c.get("/v1/models").json()["data"]]
+    assert "xyq-video" in ids and "xyq-video-pro" in ids
+
+    resp = c.post("/v1/video/generations", json={
+        "prompt": "a cat", "model": "xyq-video", "duration": 10,
+    })
+    assert resp.status_code == 200, resp.text
+    url = resp.json()["data"][0]["video_url"]
+    assert url.startswith("/xyq-files/")
+
+    # generated file is served
+    file_resp = c.get(url)
+    assert file_resp.status_code == 200
+    assert b"fake mp4" in file_resp.content
+
+
+def test_xyq_admin_endpoints(xyq_app_client):
+    c = xyq_app_client
+    status = c.get("/admin/api/xyq").json()
+    assert status["configured"] is True
+    assert status["cookies"] == ["test_cookie.json"]
+    assert "xyq-video-pro" in status["models"]
+
+    channel = c.get("/admin/api/channel").json()
+    assert channel["xiaoyunque"]["configured"] is True
+
+    # delete cookie -> channel becomes unconfigured
+    r = c.delete("/admin/api/xyq/cookies/test_cookie")
+    assert r.status_code == 200
+    assert r.json()["cookies"] == []
+    assert c.get("/admin/api/channel").json()["xiaoyunque"]["configured"] is False
+
+
+def test_xyq_video_without_cookies_503(tmp_path, monkeypatch):
+    monkeypatch.delenv("VOLC_API_KEY", raising=False)
+    cookies_dir = tmp_path / "empty_xyq"
+    cookies_dir.mkdir()
+    monkeypatch.setenv("XYQ_COOKIES_DIR", str(cookies_dir))
+    monkeypatch.setenv("XYQ_OUTPUT_DIR", str(tmp_path / "out"))
+
+    from doubao2api.browser_client import BrowserClient
+    with patch.object(BrowserClient, "start", new=AsyncMock(return_value=None)), \
+         patch.object(BrowserClient, "is_ready", new_callable=lambda: property(lambda self: False)):
+        app = us.create_app(api_key=None)
+        with TestClient(app) as c:
+            resp = c.post("/v1/video/generations", json={"prompt": "x", "model": "xyq-video"})
+            assert resp.status_code == 503

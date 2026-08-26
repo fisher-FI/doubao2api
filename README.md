@@ -1039,6 +1039,9 @@ server {
 | `VOLC_CHAT_MODEL` | `doubao-pro-32k-250715` | 官方通道聊天模型 |
 | `VOLC_IMAGE_MODEL` | `doubao-seedream-5-0-pro-260128` | 官方通道图片模型 |
 | `VOLC_VIDEO_MODEL` | `doubao-seedance-1-5-pro-251215` | 官方通道视频模型 |
+| `XYQ_COOKIES_DIR` | `./xyq_cookies` | 小云雀 Cookie 目录（见下方「小云雀通道」） |
+| `XYQ_OUTPUT_DIR` | `./xyq_downloads` | 小云雀生成视频输出目录（经 `/xyq-files/{name}` 下载） |
+| `XYQ_HEADLESS` | `true` | 小云雀 Playwright 无头模式 |
 
 ## 多账号免费池与官方通道
 
@@ -1094,10 +1097,35 @@ export VOLC_API_KEY=your-api-key
 
 路由规则：`doubao*` 优先免费池 → 浏览器单账号 → 官方通道；`volc*` 固定走官方。
 
+### 小云雀通道（剪映 Seedance 2.0）
+
+内置 [XiakeMan777/seedance2.0_XYQ_APi](https://github.com/XiakeMan777/seedance2.0_XYQ_APi) 的 Playwright 自动化引擎（已 vendor 进本包，见 `doubao2api/xiaoyunque_engine.py`），把**剪映小云雀网页版（xyq.jianying.com）**的 Seedance 2.0 封装为 `xyq-*` 模型。小云雀是字节系里画质口碑最好的 Seedance 入口，支持 **5/10/15 秒**、文生视频与图生视频，每日登录送积分。
+
+使用步骤：
+
+1. 在 `xyq.jianying.com` 注册/登录（手机号可与豆包相同，额度体系独立）；
+2. 浏览器导出 Cookie JSON（EditThisCookie 或 DevTools），启动服务后到 Admin「通道配置」Tab 上传，或直接放入 `xyq_cookies/` 目录；
+3. 调用模型：
+
+| 模型 ID | 说明 | 积分消耗 |
+|---|---|---|
+| `xyq-video` | Seedance 2.0 Fast | 5 积分/秒 |
+| `xyq-video-pro` | Seedance 2.0 标准画质 | 8 积分/秒 |
+
+```bash
+curl http://localhost:9090/v1/video/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model":"xyq-video","prompt":"海边日落延时摄影","duration":10,"ratio":"16:9"}'
+# -> {"data":[{"video_url":"/xyq-files/cat_10s_x.mp4", ...}]}
+```
+
+- 多 Cookie 自动轮换：积分不足/限流自动切换下一个；
+- 引擎为 Playwright 浏览器自动化，首次生成会启动 Chromium（约 300–500MB 内存），`XYQ_HEADLESS=false` 可观察流程。
+
 ### Admin 面板新功能
 
 - **账号管理 Tab**：查看每个账号的健康状态、成功/失败计数、连续失败、风控标记、当日额度；支持上传 session 文件添加账号、启用/停用、单个探活、删除。
-- **通道配置 Tab**：查看免费池与官方通道的配置状态和默认通道。
+- **通道配置 Tab**：查看免费池、官方通道、小云雀通道的配置状态和默认通道；上传/删除小云雀 Cookie。
 
 
 ### 认证

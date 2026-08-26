@@ -539,3 +539,130 @@ class VolcanoBackend:
 
     async def upload_image(self, image_bytes: bytes, filename: str) -> Dict[str, Any]:
         return await self._client.upload_image(image_bytes=image_bytes, filename=filename)
+
+
+class XiaoyunqueBackend:
+    """小云雀 (剪映 Seedance 2.0) channel backed by the vendored Playwright engine.
+
+    Only video generation is supported. The engine handles multi-cookie
+    rotation, credit checks and downloads internally; generated files land in
+    ``output_dir`` and are served by the server via ``/xyq-files/{name}``.
+    """
+
+    # quality label -> engine model key
+    QUALITY_MAP = {"fast": "fast", "2.0": "2.0"}
+
+    def __init__(self, cookies_dir: str, output_dir: str,
+                 headless: bool = True, engine=None):
+        if engine is None:
+            from . import xiaoyunque_engine as engine
+        self._engine = engine
+        self._engine.config.cookies_dir = cookies_dir
+        self._engine.config.output_dir = output_dir
+        self._engine.config.headless = headless
+        self._output_dir = output_dir
+
+    @property
+    def is_ready(self) -> bool:
+        return len(self.cookie_names()) > 0
+
+    @property
+    def needs_captcha(self) -> bool:
+        return False
+
+    @property
+    def consecutive_failures(self) -> int:
+        return 0
+
+    @property
+    def last_error_code(self) -> int:
+        return 0
+
+    def record_success(self):
+        pass
+
+    def record_failure(self, error_code: int = 0):
+        pass
+
+    @staticmethod
+    def extract_conversation_id(event: Dict[str, Any]) -> Optional[str]:
+        return None
+
+    def cookie_names(self) -> List[str]:
+        try:
+            return list(self._engine.get_token_files())
+        except Exception:
+            return []
+
+    @staticmethod
+    def _coerce_ratio(ratio: Optional[str]) -> str:
+        # xiaoyquee web UI supports 16:9 / 9:16 only; engine maps 1:1 already
+        if ratio in ("16:9", "9:16"):
+            return ratio
+        return "16:9"
+
+    async def generate_video(
+        self,
+        prompt: str,
+        ratio: Optional[str] = None,
+        duration: int = 10,
+        quality: str = "fast",
+    ) -> Dict[str, Any]:
+        """Generate a video via the xiaoyquee engine.
+
+        Returns the standard dict shape: {"videos": [{"video_url": ...}], ...}
+        where ``video_url`` points at the local file-serving endpoint.
+        """
+        duration = int(duration) if duration in (5, 10, 15, "5", "10", "15") else 10
+        engine_model = self.QUALITY_MAP.get(quality, "fast")
+        out_path = await self._engine.run(
+            prompt=prompt,
+            duration=duration,
+            ratio=self._coerce_ratio(ratio),
+            model=engine_model,
+            ref_images=None,
+            output_dir=self._output_dir,
+            cookie_file=None,
+        )
+        if not out_path:
+            raise RuntimeError("xiaoyunque generation returned no result")
+        import os as _os
+        name = _os.path.basename(out_path)
+        return {
+            "videos": [
+                {
+                    "video_url": f"/xyq-files/{name}",
+                    "cover_url": "",
+                    "width": 0,
+                    "height": 0,
+                    "duration": float(duration),
+                }
+            ],
+            "prompt": prompt,
+        }
+
+    # ── Unsupported capabilities (uniform dict interface) ──
+
+    async def chat_completion(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def chat(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def chat_with_file(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def generate_image(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def generate_music(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def upload_file(self, *args, **kwargs):
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def get_file_download_url(self, uri: str, expire_seconds: int = 3600) -> str:
+        raise RuntimeError("Xiaoyunque channel only supports video generation")
+
+    async def upload_image(self, image_bytes: bytes, filename: str) -> Dict[str, Any]:
+        raise RuntimeError("Xiaoyunque channel only supports video generation")

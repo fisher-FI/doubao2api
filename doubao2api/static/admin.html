@@ -287,9 +287,39 @@ class="px-2.5 py-1 bg-brand-900/40 text-brand-300 text-xs rounded-full border bo
 </div>
 </div>
 </div>
+<!-- 小云雀通道 -->
+<div class="card mt-4">
+<h3 class="text-sm font-medium text-slate-300 mb-3">小云雀通道（剪映 Seedance 2.0）</h3>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+<div class="space-y-2 text-sm">
+<div class="flex justify-between"><span class="text-slate-400">已配置</span>
+<span :class="channelData.xiaoyunque&&channelData.xiaoyunque.configured?'text-green-400':'text-red-400'">{{channelData.xiaoyunque&&channelData.xiaoyunque.configured?'是':'否'}}</span></div>
+<div class="flex justify-between"><span class="text-slate-400">Cookie 数量</span><span class="font-mono">{{channelData.xiaoyunque?channelData.xiaoyunque.cookies.length:0}}</span></div>
+<div class="mt-2 pt-2 border-t border-slate-700 text-xs text-slate-500 leading-relaxed">
+模型：<code class="text-brand-400">xyq-video</code>（Fast，5 积分/秒）/ <code class="text-brand-400">xyq-video-pro</code>（8 积分/秒）<br/>
+支持 5/10/15 秒、文生视频与图生视频；每日登录小云雀送积分。
+</div>
+</div>
+<div class="space-y-2 text-sm">
+<div class="flex items-center gap-2 flex-wrap">
+<input type="file" id="xyq-cookie-file" accept=".json" class="text-xs text-slate-400 file:mr-2 file:px-2 file:py-1 file:rounded-lg file:border-0 file:bg-brand-600 file:text-white file:text-xs file:cursor-pointer"/>
+<button @click="addXyqCookie" class="btn-sm">上传 Cookie</button>
+<button @click="fetchChannel" class="btn-sm ml-auto">刷新</button>
+</div>
+<div class="flex flex-wrap gap-1.5 pt-1">
+<span v-for="ck in (channelData.xiaoyunque?channelData.xiaoyunque.cookies:[])" :key="ck"
+class="inline-flex items-center gap-1 px-2 py-0.5 bg-surface-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-300">
+{{ck}}
+<button @click="deleteXyqCookie(ck)" class="text-red-400 hover:text-red-300">×</button>
+</span>
+<span v-if="!channelData.xiaoyunque||!channelData.xiaoyunque.cookies.length" class="text-xs text-slate-500">暂无 Cookie。登录 xyq.jianying.com 后导出 Cookie JSON 上传</span>
+</div>
+</div>
+</div>
+</div>
 <div class="card mt-4 text-xs text-slate-500 leading-relaxed">
 <h3 class="text-sm font-medium text-slate-300 mb-2">路由说明</h3>
-<p><code class="text-brand-400">doubao*</code> 模型优先走免费账号池；池不可用时回退到浏览器单账号，再回退到官方通道。<code class="text-brand-400">volc*</code> 模型固定走官方通道。</p>
+<p><code class="text-brand-400">doubao*</code> 模型优先走免费账号池；池不可用时回退到浏览器单账号，再回退到官方通道。<code class="text-brand-400">volc*</code> 模型固定走官方通道。<code class="text-brand-400">xyq*</code> 模型固定走小云雀通道（需上传剪映 Cookie）。</p>
 </div>
 </section>
 </div></div></div>
@@ -318,7 +348,7 @@ const test=reactive({model:'doubao-think',stream:true,prompt:'',output:'',thinki
 const logs=ref([]);
 const screenshot=reactive({img:"",loading:false,time:""});
 const accountData=ref({accounts:[],total:0,healthy:0});
-const channelData=ref({free_accounts:{configured:false,total:0,healthy:0},volcano:{configured:false,api_key_set:false},default_channel:'free'});
+const channelData=ref({free_accounts:{configured:false,total:0,healthy:0},volcano:{configured:false,api_key_set:false},xiaoyunque:{configured:false,cookies:[]},default_channel:'free'});
 const accountForm=reactive({name:'',loading:false});
 const currentTime=ref('');
 const allModels=['doubao','doubao-quick','doubao-think','doubao-auto','doubao-expert','doubao-pro','doubao-image','doubao-video','doubao-music'];
@@ -355,6 +385,22 @@ async function addAccount(){
     fetchAccounts();fetchChannel();
   }catch(e){alert('添加失败: '+e.message)}finally{accountForm.loading=false}}
 async function fetchChannel(){try{channelData.value=await api('/admin/api/channel')}catch(e){}}
+async function addXyqCookie(){
+  const fileInput=document.getElementById('xyq-cookie-file');
+  if(!fileInput||!fileInput.files.length){alert('请选择 Cookie JSON 文件');return}
+  try{
+    const fd=new FormData();
+    fd.append('file',fileInput.files[0]);
+    const r=await fetch(API+'/admin/api/xyq/cookies',{headers:{'Authorization':'Bearer '+key},method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'HTTP '+r.status);
+    fileInput.value='';
+    fetchChannel();
+  }catch(e){alert('上传失败: '+e.message)}}
+async function deleteXyqCookie(name){
+  if(!confirm('删除小云雀 Cookie '+name+' ?'))return;
+  try{await api('/admin/api/xyq/cookies/'+encodeURIComponent(name),{method:'DELETE'})}catch(e){}
+  fetchChannel()}
 let qrPoll=null;
 async function startQr(){qr.img='';qr.st='';qr.text='生成中...';
 try{const r=await api('/v1/session/qr-login',{method:'POST'});
@@ -407,7 +453,8 @@ setInterval(()=>{if(activeTab.value===3)fetchLogs()},5000)});
 return{tabs,icons,activeTab,session,sysInfo,cookieData,probe,qr,qrColor,test,logs,allModels,currentTime,screenshot,
 accountData,channelData,accountForm,
 fmtDur,fmtTime,fetchOverview,probeSession,fetchLogs,startQr,loadVnc,takeScreenshot,runTest,
-fetchAccounts,toggleAccount,probeAccount,deleteAccount,addAccount,fetchChannel}}}).mount('#app');
+fetchAccounts,toggleAccount,probeAccount,deleteAccount,addAccount,fetchChannel,
+addXyqCookie,deleteXyqCookie}}}).mount('#app');
 </script>
 </body>
 </html>
