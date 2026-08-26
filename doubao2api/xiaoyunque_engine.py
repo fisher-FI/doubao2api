@@ -752,7 +752,9 @@ async def run_with_cookie(prompt: str, duration: int, ratio: str, model: str,
             safe_name = ''.join(c for c in prompt[:15] if c.isalnum() or c in '_ ') or 'video'
             out_path = os.path.join(output_dir, f'{safe_name}_{duration}s_{ts}.mp4')
             log(f'[*] 下载: {out_path}')
-            if download_video(mp4_url, out_path):
+            # download_video is sync (urllib) — offload to a thread so the
+            # FastAPI event loop is not blocked during large file downloads.
+            if await asyncio.to_thread(download_video, mp4_url, out_path):
                 size_mb = os.path.getsize(out_path) / 1048576
                 log(f'[DONE] {out_path} ({size_mb:.1f}MB)')
                 return out_path
